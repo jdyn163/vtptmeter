@@ -1,136 +1,116 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-const SCRIPT_URL = process.env.SCRIPT_URL as string;
-const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN as string;
+const SCRIPT_URL = process.env.SCRIPT_URL;
+const VTPT_PIN = process.env.VTPT_PIN;
 
-// ✅ Option 1: simple PIN gate for writes
-const VTPT_PIN = process.env.VTPT_PIN as string;
+type ApiOk<T> = { ok: true; data: T };
+type ApiErr = { ok: false; error: string };
 
-// simple fetch timeout helper
-async function fetchWithTimeout(
-  url: string,
-  options: RequestInit = {},
-  ms = 12000
-) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
+function getHeaderPin(req: NextApiRequest): string {
+  const raw = req.headers["x-vtpt-pin"];
+  const pin = Array.isArray(raw) ? raw[0] : raw;
+  return (pin || "").trim();
+}
+
+async function fetchJson(url: string, init?: RequestInit) {
+  const res = await fetch(url, init);
+  const text = await res.text();
+
+  let json: any;
   try {
-    const r = await fetch(url, { ...options, signal: controller.signal });
-    return r;
-  } finally {
-    clearTimeout(id);
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(text || `Upstream error ${res.status}`);
   }
+
+  return { status: res.status, json };
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse
+  res: NextApiResponse<ApiOk<any> | ApiErr>
 ) {
   try {
-    if (!SCRIPT_URL || !SCRIPT_TOKEN) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing SCRIPT_URL or SCRIPT_TOKEN in .env.local",
-      });
+    if (!SCRIPT_URL) {
+      return res.status(500).json({ ok: false, error: "Missing SCRIPT_URL" });
     }
 
-    // (Optional) You can require VTPT_PIN only for POST.
-    // If you want to require it for GET too, move this check above the GET/POST split.
+    // =========================
+    // READ (no PIN required)
+    // =========================
+    if (req.method === "GET") {
+      const action = String(req.query.action || "");
+      const room = String(req.query.room || "").trim();
+
+      if (!action)
+        return res.status(400).json({ ok: false, error: "Missing action" });
+      if (!room)
+        return res.status(400).json({ ok: false, error: "Missing room" });
+
+      const url = new URL(SCRIPT_URL);
+      url.searchParams.set("action", action);
+      url.searchParams.set("room", room);
+
+      if (req.query.limit)
+        url.searchParams.set("limit", String(req.query.limit));
+      if (req.query.house)
+        url.searchParams.set("house", String(req.query.house));
+
+      const { status, json } = await fetchJson(url.toString());
+      return res.status(status).json(json);
+    }
+
+    // =========================
+    // WRITE (HARD LOCK: PIN REQUIRED)
+    // =========================
     if (req.method === "POST") {
+      // 🔒 HARD LOCK: server MUST be configured with a PIN
       if (!VTPT_PIN) {
         return res.status(500).json({
           ok: false,
-          error: "Missing VTPT_PIN in .env.local",
+          error:
+            "Server not configured: VTPT_PIN is missing. Writes are disabled.",
         });
       }
 
-      const pin = String(req.headers["x-vtpt-pin"] || "").trim();
-      if (pin !== VTPT_PIN) {
+      const pin = getHeaderPin(req);
+      if (!pin || pin !== VTPT_PIN) {
         return res
           .status(401)
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
-    }
 
-    if (req.method === "GET") {
-      const action = String(req.query.action || "latest").trim();
+      const { room, dien, nuoc, note } = req.body || {};
+      const roomStr = String(room || "").trim();
 
-      // ✅ batch latest for an entire house (A0, A1, ...)
-      if (action === "houseLatest") {
-        const house = String(req.query.house || "").trim();
-        if (!house)
-          return res.status(400).json({ ok: false, error: "Missing house" });
-
-        const url =
-          `${SCRIPT_URL}?action=houseLatest` +
-          `&house=${encodeURIComponent(house)}` +
-          `&token=${encodeURIComponent(SCRIPT_TOKEN)}`;
-
-        const r = await fetchWithTimeout(url);
-        const data = await r.json();
-        return res.status(200).json(data);
-      }
-
-      // ✅ batch history per room for an entire house
-      if (action === "houseHistory") {
-        const house = String(req.query.house || "").trim();
-        if (!house)
-          return res.status(400).json({ ok: false, error: "Missing house" });
-
-        const limitPerRoom = String(req.query.limitPerRoom || "24").trim();
-
-        const url =
-          `${SCRIPT_URL}?action=houseHistory` +
-          `&house=${encodeURIComponent(house)}` +
-          `&limitPerRoom=${encodeURIComponent(limitPerRoom)}` +
-          `&token=${encodeURIComponent(SCRIPT_TOKEN)}`;
-
-        const r = await fetchWithTimeout(url);
-        const data = await r.json();
-        return res.status(200).json(data);
-      }
-
-      // existing room-based actions
-      const room = String(req.query.room || "").trim();
-      if (!room)
+      if (!roomStr)
         return res.status(400).json({ ok: false, error: "Missing room" });
+      if (!Number.isFinite(Number(dien)))
+        return res.status(400).json({ ok: false, error: "Invalid dien" });
+      if (!Number.isFinite(Number(nuoc)))
+        return res.status(400).json({ ok: false, error: "Invalid nuoc" });
 
-      const limit = String(req.query.limit || "20").trim();
+      const payload = {
+        action: "save",
+        room: roomStr,
+        dien: Number(dien),
+        nuoc: Number(nuoc),
+        note: typeof note === "string" ? note : "",
+      };
 
-      let url =
-        `${SCRIPT_URL}?action=${encodeURIComponent(action)}` +
-        `&room=${encodeURIComponent(room)}` +
-        `&token=${encodeURIComponent(SCRIPT_TOKEN)}`;
+      const { status, json } = await fetchJson(SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-      if (action === "history") {
-        url += `&limit=${encodeURIComponent(limit)}`;
-      }
-
-      const r = await fetchWithTimeout(url);
-      const data = await r.json();
-      return res.status(200).json(data);
-    }
-
-    if (req.method === "POST") {
-      const url = `${SCRIPT_URL}?token=${encodeURIComponent(SCRIPT_TOKEN)}`;
-
-      const r = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(req.body),
-        },
-        15000
-      );
-
-      const data = await r.json();
-      return res.status(200).json(data);
+      return res.status(status).json(json);
     }
 
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   } catch (err: any) {
-    const msg = String(err?.name === "AbortError" ? "Upstream timeout" : err);
-    return res.status(500).json({ ok: false, error: msg });
+    return res
+      .status(500)
+      .json({ ok: false, error: err?.message || String(err) });
   }
 }

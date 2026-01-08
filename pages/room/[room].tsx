@@ -9,12 +9,10 @@ type HistoryItem = {
 };
 
 function houseLatestKey(house: string) {
-  // 🔁 RESTORED original key (matches old app)
   return `vtpt_houseLatest_${house}`;
 }
 
 function houseHistoryKey(house: string) {
-  // 🔁 RESTORED original key (matches old app)
   return `vtpt_houseHistory_${house}`;
 }
 
@@ -36,18 +34,31 @@ export default function RoomPage() {
   }, [room]);
 
   // =========================
-  // Load cached history
+  // Load cached history (safe)
   // =========================
   useEffect(() => {
     if (!house) return;
 
     try {
       const raw = localStorage.getItem(houseHistoryKey(house));
-      if (raw) {
-        setHistory(JSON.parse(raw));
+      if (!raw) {
+        setHistory([]);
+        return;
+      }
+
+      const parsed = JSON.parse(raw);
+
+      // ✅ FIX: handle old cache shapes
+      if (Array.isArray(parsed)) {
+        setHistory(parsed);
+      } else if (parsed && typeof parsed === "object") {
+        // migrate single object → array
+        setHistory([parsed]);
+      } else {
+        setHistory([]);
       }
     } catch {
-      // ignore corrupt cache
+      setHistory([]);
     }
   }, [house]);
 

@@ -12,6 +12,19 @@ type Reading = {
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
+function getPinForWrite(): string {
+  if (typeof window === "undefined") return "";
+  const key = "vtpt_pin";
+  const current = (sessionStorage.getItem(key) || "").trim();
+  if (current) return current;
+
+  // If they left it blank on first open, ask again only when trying to save.
+  const entered =
+    window.prompt("Enter VTPT PIN to save changes:")?.trim() || "";
+  if (entered) sessionStorage.setItem(key, entered);
+  return entered;
+}
+
 function formatDateShort(d: Date) {
   return d.toLocaleDateString();
 }
@@ -20,51 +33,120 @@ function formatDateTime(d: Date) {
   return d.toLocaleString();
 }
 
-function diffText(diff: number | null) {
-  if (diff === null) return "--";
-  if (diff > 0) return `+${diff}`;
-  return String(diff);
+function monthKeyISO(iso: string) {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
 }
 
-function latestKey(house: string) {
-  return `vtpt_houseLatest_${house}`;
-}
-function historyKey(house: string) {
-  return `vtpt_houseHistory_${house}`;
+function upsertMonthlyHistory(list: Reading[], reading: Reading, max = 24) {
+  const next = Array.isArray(list) ? [...list] : [];
+
+  const key = monthKeyISO(reading.date);
+  const idx = next.findIndex((r) => monthKeyISO(r.date) === key);
+
+  if (idx >= 0) next[idx] = reading;
+  else next.unshift(reading);
+
+  next.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return next.slice(0, max);
 }
 
-function safeJsonParse<T>(s: string | null): T | null {
-  if (!s) return null;
+function safeJsonParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
   try {
-    return JSON.parse(s) as T;
+    return JSON.parse(raw) as T;
   } catch {
     return null;
   }
 }
 
-function monthKeyFromDateString(dateStr: string) {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "unknown";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+function latestKey(room: string) {
+  return `vtpt_room_latest:${room}`;
 }
 
-/**
- * ✅ Upsert "monthly history"
- * - If same month already exists -> REPLACE (edit)
- * - Else -> UNHSHIFT (add new month)
- */
-function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
-  const mk = monthKeyFromDateString(incoming.date);
+function historyKey(room: string) {
+  return `vtpt_room_history:${room}`;
+}
 
-  const next = Array.isArray(list) ? list.slice() : [];
+function houseLatestKey(house: string) {
+  return `vtpt_house_latest:${house}`;
+}
 
-  // Remove any existing row in same month (edit behavior)
-  const filtered = next.filter((r) => monthKeyFromDateString(r.date) !== mk);
+function houseHistoryKey(house: string) {
+  return `vtpt_house_history:${house}`;
+}
 
-  // Put incoming on top
-  filtered.unshift(incoming);
+function readCachedLatest(room: string): CacheEnvelope<Reading> | null {
+  if (typeof window === "undefined") return null;
+  return safeJsonParse<CacheEnvelope<Reading>>(
+    localStorage.getItem(latestKey(room))
+  );
+}
 
-  // OPTIONAL: keep sorted by date desc (nice + stable)
+function readCachedHistory(room: string): CacheEnvelope<Reading[]> | null {
+  if (typeof window === "undefined") return null;
+  return safeJsonParse<CacheEnvelope<Reading[]>>(
+    localStorage.getItem(historyKey(room))
+  );
+}
+
+function writeCachedLatest(room: string, reading: Reading) {
+  if (typeof window === "undefined") return;
+  const env: CacheEnvelope<Reading> = { savedAt: Date.now(), data: reading };
+  localStorage.setItem(latestKey(room), JSON.stringify(env));
+}
+
+function writeCachedHistory(room: string, list: Reading[]) {
+  if (typeof window === "undefined") return;
+  const env: CacheEnvelope<Reading[]> = { savedAt: Date.now(), data: list };
+  localStorage.setItem(historyKey(room), JSON.stringify(env));
+}
+
+function upsertHouseLatestCache(house: string, reading: Reading) {
+  if (typeof window === "undefined") return;
+  const key = houseLatestKey(house);
+  const cached = safeJsonParse<CacheEnvelope<Record<string, Reading>>>(
+    localStorage.getItem(key)
+  );
+
+  const data: Record<string, Reading> = cached?.data || {};
+  data[reading.room] = reading;
+
+  const env: CacheEnvelope<Record<string, Reading>> = {
+    savedAt: Date.now(),
+    data,
+  };
+  localStorage.setItem(key, JSON.stringify(env));
+}
+
+function upsertHouseHistoryCache(house: string, reading: Reading, max = 24) {
+  if (typeof window === "undefined") return;
+  const key = houseHistoryKey(house);
+  const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
+    localStorage.getItem(key)
+  );
+
+  const data: Record<string, Reading[]> = cached?.data || {};
+  const prev = Array.isArray(data[reading.room]) ? data[reading.room] : [];
+
+  // monthly upsert (replace same month instead of new row)
+  data[reading.room] = upsertMonthlyHistory(prev, reading, max);
+
+  const env: CacheEnvelope<Record<string, Reading[]>> = {
+    savedAt: Date.now(),
+    data,
+  };
+  localStorage.setItem(key, JSON.stringify(env));
+}
+
+function filterAndTrim(list: Reading[], max = 24) {
+  const filtered = (Array.isArray(list) ? list : []).filter(
+    (r) => r && typeof r.date === "string"
+  );
+
+  // keep sorted by date desc (nice + stable)
   filtered.sort((a, b) => {
     const da = new Date(a.date).getTime();
     const db = new Date(b.date).getTime();
@@ -77,226 +159,90 @@ function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
   return filtered.slice(0, max);
 }
 
-function upsertHouseLatestCache(house: string, updated: Reading) {
-  if (!house) return;
-
-  const key = latestKey(house);
-  const cached = safeJsonParse<CacheEnvelope<Reading[]>>(
-    localStorage.getItem(key)
-  );
-
-  const data = Array.isArray(cached?.data) ? cached!.data.slice() : [];
-  const idx = data.findIndex((x) => x.room === updated.room);
-
-  if (idx >= 0) data[idx] = updated;
-  else data.push(updated);
-
-  localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-}
-
-function upsertHouseHistoryCache(
-  house: string,
-  reading: Reading,
-  maxPerRoom = 24
-) {
-  if (!house) return;
-
-  const key = historyKey(house);
-  const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key)
-  );
-
-  const data: Record<string, Reading[]> = cached?.data
-    ? { ...cached.data }
-    : {};
-
-  const list = Array.isArray(data[reading.room]) ? data[reading.room] : [];
-
-  // ✅ monthly upsert (edit doesn't create "new row")
-  data[reading.room] = upsertMonthlyHistory(list, reading, maxPerRoom);
-
-  localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-}
-
-// -------------------- ✅ Numeric-only helpers --------------------
-function digitsOnly(s: string) {
-  return String(s ?? "").replace(/[^\d]/g, "");
-}
-
-function setNumberOnly(raw: string, setter: (v: string) => void) {
-  setter(digitsOnly(raw));
-}
-
-function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
-  // allow navigation/edit keys
-  const allowed = [
-    "Backspace",
-    "Delete",
-    "Tab",
-    "Enter",
-    "Escape",
-    "ArrowLeft",
-    "ArrowRight",
-    "ArrowUp",
-    "ArrowDown",
-    "Home",
-    "End",
-  ];
-  if (allowed.includes(e.key)) return;
-
-  // allow copy/paste shortcuts
-  if (e.ctrlKey || e.metaKey) return;
-
-  // allow digits only
-  if (/^\d$/.test(e.key)) return;
-
-  // block everything else (e, -, ., space, etc.)
-  e.preventDefault();
-}
-// ----------------------------------------------------------------
-
 export default function RoomPage() {
   const router = useRouter();
-  const room = (router.query.room as string) || "";
-  const house = (router.query.house as string) || "";
+  const room = String(router.query.room || "").trim();
+  const house =
+    typeof router.query.house === "string" ? router.query.house : undefined;
 
-  // This month
-  const [loadingLatest, setLoadingLatest] = useState(true);
   const [latest, setLatest] = useState<Reading | null>(null);
-
-  // History (fast from cache)
-  const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const [tab, setTab] = useState<"dien" | "nuoc">("dien");
-
-  // bottom sheet
   const [showSheet, setShowSheet] = useState(false);
   const [dienInput, setDienInput] = useState("");
   const [nuocInput, setNuocInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
 
   const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
-  // TTL to avoid spamming Apps Script
-  const TTL_MS = 2 * 60 * 1000;
-
-  function loadFromCaches() {
-    if (!room || !house) return;
-
-    // latest from cache
-    setLoadingLatest(true);
-    const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
-    );
-    const foundLatest =
-      cachedLatest?.data?.find((x) => x.room === room) || null;
-    setLatest(foundLatest);
-    setLoadingLatest(false);
-
-    // history from cache
-    setLoadingHistory(true);
-    const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
-    );
-    const list = cachedHist?.data?.[room];
-    setHistory(Array.isArray(list) ? list : []);
-    setLoadingHistory(false);
-  }
+  const [tab, setTab] = useState<"dien" | "nuoc">("dien");
 
   async function backgroundRefreshIfStale() {
-    if (!house) return;
+    if (!room) return;
+    const cachedLatest = readCachedLatest(room);
+    const cachedHistory = readCachedHistory(room);
 
-    const latestCache = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
-    );
-    const histCache = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
-    );
+    if (cachedLatest?.data) setLatest(cachedLatest.data);
+    if (cachedHistory?.data) setHistory(filterAndTrim(cachedHistory.data, 24));
 
-    const latestFresh =
-      latestCache?.savedAt && Date.now() - latestCache.savedAt < TTL_MS;
-    const histFresh =
-      histCache?.savedAt && Date.now() - histCache.savedAt < TTL_MS;
+    const now = Date.now();
+    const latestStale =
+      !cachedLatest?.savedAt || now - cachedLatest.savedAt > 60_000;
+    const historyStale =
+      !cachedHistory?.savedAt || now - cachedHistory.savedAt > 120_000;
 
-    if (latestFresh && histFresh) return;
-
-    try {
-      if (!latestFresh) {
-        const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
-        );
-        const j1 = await r1.json();
-        const arr: Reading[] = Array.isArray(j1.data) ? j1.data : [];
-        localStorage.setItem(
-          latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr })
-        );
-      }
-
-      if (!histFresh) {
-        const r2 = await fetch(
-          `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house
-          )}&limitPerRoom=24`
-        );
-        const j2 = await r2.json();
-        const data: Record<string, Reading[]> =
-          j2 && j2.ok && j2.data ? j2.data : {};
-        localStorage.setItem(
-          historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data })
-        );
-      }
-
-      loadFromCaches();
-    } catch {
-      // ignore; cache UI still works
-    }
+    if (latestStale) await refreshLatestFromNetwork();
+    if (historyStale) await refreshHistoryFromNetwork();
   }
 
   async function refreshLatestFromNetwork() {
     if (!room) return;
-    try {
-      const latestRes = await fetch(
-        `/api/meter?room=${encodeURIComponent(room)}&action=latest`
-      );
-      const latestJson = await latestRes.json();
-      const latestData: Reading | null = latestJson.data || null;
 
-      setLatest(latestData);
-      if (latestData && house) upsertHouseLatestCache(house, latestData);
+    const url = `/api/meter?action=latest&room=${encodeURIComponent(room)}`;
+    const res = await fetch(url);
+    const json = await res.json();
 
-      // ✅ keep history consistent (same-month replace)
-      if (latestData && house) {
-        upsertHouseHistoryCache(house, latestData, 24);
-        setHistory((prev) => upsertMonthlyHistory(prev, latestData, 24));
-      }
-    } catch {
-      // ignore
+    if (json?.ok && json?.data) {
+      setLatest(json.data);
+      writeCachedLatest(room, json.data);
+    }
+  }
+
+  async function refreshHistoryFromNetwork() {
+    if (!room) return;
+
+    let url = `/api/meter?action=history&room=${encodeURIComponent(
+      room
+    )}&limit=24`;
+    if (house) url += `&house=${encodeURIComponent(house)}`;
+
+    const res = await fetch(url);
+    const json = await res.json();
+
+    if (json?.ok && Array.isArray(json?.data)) {
+      const trimmed = filterAndTrim(json.data, 24);
+      setHistory(trimmed);
+      writeCachedHistory(room, trimmed);
     }
   }
 
   useEffect(() => {
+    if (!router.isReady) return;
     if (!room) return;
 
-    setShowSheet(false);
-    setDienInput("");
-    setNuocInput("");
-    setNoteInput("");
-    setMsg(null);
-    setToast(null);
-    setTab("dien");
-
-    loadFromCaches();
-    backgroundRefreshIfStale();
-
+    setLoading(true);
+    backgroundRefreshIfStale()
+      .catch((err) => console.error(err))
+      .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room, house]);
+  }, [router.isReady, room]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") setShowSheet(false);
     }
@@ -361,7 +307,10 @@ export default function RoomPage() {
     try {
       const res = await fetch("/api/meter", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-vtpt-pin": getPinForWrite(),
+        },
         body: JSON.stringify({
           room,
           dien: dienNum,
@@ -397,413 +346,282 @@ export default function RoomPage() {
     return list.map((row, idx) => {
       const currVal = tab === "dien" ? Number(row.dien) : Number(row.nuoc);
       const nextOlder = list[idx + 1];
-      const prevVal = nextOlder
+      const nextVal = nextOlder
         ? tab === "dien"
           ? Number(nextOlder.dien)
           : Number(nextOlder.nuoc)
         : null;
 
-      const diff = prevVal === null ? null : currVal - prevVal;
+      const diff =
+        Number.isFinite(currVal) && Number.isFinite(nextVal as number)
+          ? currVal - (nextVal as number)
+          : null;
 
       const d = new Date(row.date);
-      const safeDate = isNaN(d.getTime()) ? null : d;
+      const dateLabel = isNaN(d.getTime()) ? row.date : formatDateShort(d);
 
-      return {
-        key: `${row.room}-${row.id}-${row.date}-${tab}`, // ✅ stable key
-        dateText: safeDate ? formatDateShort(safeDate) : String(row.date),
-        value: currVal,
-        diff,
-      };
+      return { row, dateLabel, diff };
     });
   }, [history, tab]);
 
   return (
-    <main
-      style={{
-        padding: 16,
-        maxWidth: 520,
-        margin: "0 auto",
-        fontFamily: "system-ui, sans-serif",
-      }}
-    >
-      {/* Top bar */}
-      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-        <button
-          onClick={() => router.push(`/house/${encodeURIComponent(house)}`)}
-          style={{
-            padding: "8px 10px",
-            borderRadius: 10,
-            border: "1px solid #ddd",
-            background: "#fff",
-            cursor: "pointer",
-          }}
-        >
-          ←
+    <main style={{ padding: 16, maxWidth: 880, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={() => router.back()} style={{ padding: "8px 12px" }}>
+          ← Back
         </button>
 
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>{room}</div>
-          <div style={{ fontSize: 12, opacity: 0.6 }}>
-            {latestDate
-              ? `Last recorded: ${formatDateTime(latestDate)}`
-              : "No record yet"}
-          </div>
+          <h1 style={{ margin: 0 }}>Room: {room}</h1>
+          {house ? (
+            <div style={{ opacity: 0.7, fontSize: 13 }}>House: {house}</div>
+          ) : null}
         </div>
 
-        {toast && (
-          <div
-            style={{
-              padding: "6px 10px",
-              borderRadius: 999,
-              border: "1px solid #ddd",
-              background: "#fff",
-              fontWeight: 800,
-              fontSize: 12,
-            }}
-          >
-            {toast}
+        <button
+          onClick={openSheet}
+          style={{
+            padding: "10px 14px",
+            fontWeight: 600,
+            borderRadius: 10,
+            cursor: "pointer",
+          }}
+        >
+          {buttonLabel}
+        </button>
+      </div>
+
+      <div style={{ height: 12 }} />
+
+      {toast ? (
+        <div
+          style={{
+            padding: 10,
+            borderRadius: 10,
+            background: "rgba(0,0,0,0.06)",
+            marginBottom: 12,
+          }}
+        >
+          {toast}
+        </div>
+      ) : null}
+
+      {msg ? (
+        <div
+          style={{
+            padding: 10,
+            borderRadius: 10,
+            background: "rgba(255,0,0,0.08)",
+            marginBottom: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {msg}
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          padding: 14,
+          borderRadius: 14,
+          border: "1px solid rgba(0,0,0,0.12)",
+        }}
+      >
+        <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+          <h2 style={{ margin: 0 }}>Latest</h2>
+          {loading ? <span style={{ opacity: 0.7 }}>Loading…</span> : null}
+        </div>
+
+        <div style={{ height: 8 }} />
+
+        {latest ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <div>
+              <b>Date:</b>{" "}
+              {latestDate ? formatDateTime(latestDate) : String(latest.date)}
+            </div>
+            <div>
+              <b>Điện:</b> {latest.dien}
+            </div>
+            <div>
+              <b>Nước:</b> {latest.nuoc}
+            </div>
+            {latest.note ? (
+              <div>
+                <b>Note:</b> {latest.note}
+              </div>
+            ) : null}
           </div>
+        ) : (
+          <div style={{ opacity: 0.7 }}>No readings yet.</div>
         )}
       </div>
 
-      {/* Part 1 */}
-      <div style={{ marginTop: 18 }}>
-        <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.75 }}>
-          This month reading
-        </div>
+      <div style={{ height: 14 }} />
 
-        <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e5e5",
-              borderRadius: 14,
-              padding: 16,
-            }}
-          >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 34,
-                fontWeight: 900,
-                letterSpacing: -1,
-              }}
-            >
-              {loadingLatest ? "…" : latest ? latest.dien : "— — —"}
-              <span
-                style={{
-                  fontSize: 16,
-                  fontWeight: 700,
-                  opacity: 0.4,
-                  marginLeft: 8,
-                }}
-              >
-                kWh
-              </span>
-            </div>
-          </div>
-
-          <div
-            style={{
-              background: "#fff",
-              border: "1px solid #e5e5e5",
-              borderRadius: 14,
-              padding: 16,
-            }}
-          >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 34,
-                fontWeight: 900,
-                letterSpacing: -1,
-              }}
-            >
-              {loadingLatest ? "…" : latest ? latest.nuoc : "— — —"}
-              <span
-                style={{
-                  fontSize: 16,
-                  fontWeight: 700,
-                  opacity: 0.4,
-                  marginLeft: 8,
-                }}
-              >
-                m³
-              </span>
-            </div>
-          </div>
-
-          <button
-            onClick={openSheet}
-            disabled={loadingLatest || !room || !house}
-            style={{
-              width: "100%",
-              padding: 14,
-              borderRadius: 14,
-              border: "1px solid #111",
-              background: "#111",
-              color: "#fff",
-              fontWeight: 900,
-              cursor: loadingLatest ? "not-allowed" : "pointer",
-            }}
-          >
-            {buttonLabel}
-          </button>
-        </div>
-      </div>
-
-      {/* Part 2 (fast, like before) */}
-      <div style={{ marginTop: 22 }}>
-        <div style={{ fontSize: 16, fontWeight: 900, opacity: 0.75 }}>
-          History
-        </div>
-
-        <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-          <button
-            onClick={() => setTab("dien")}
-            style={{
-              flex: 1,
-              padding: 10,
-              borderRadius: 999,
-              border: "1px solid #ddd",
-              background: tab === "dien" ? "#111" : "#fff",
-              color: tab === "dien" ? "#fff" : "#111",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            Electric
-          </button>
-          <button
-            onClick={() => setTab("nuoc")}
-            style={{
-              flex: 1,
-              padding: 10,
-              borderRadius: 999,
-              border: "1px solid #ddd",
-              background: tab === "nuoc" ? "#111" : "#fff",
-              color: tab === "nuoc" ? "#fff" : "#111",
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            Water
-          </button>
-        </div>
-
-        <div
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={() => setTab("dien")}
           style={{
-            marginTop: 12,
-            background: "#fff",
-            border: "1px solid #e5e5e5",
-            borderRadius: 14,
-            overflow: "hidden",
+            padding: "8px 12px",
+            borderRadius: 10,
+            border: "1px solid rgba(0,0,0,0.18)",
+            background: tab === "dien" ? "rgba(0,0,0,0.08)" : "transparent",
+            cursor: "pointer",
           }}
         >
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1.2fr 1fr 1fr",
-              padding: 12,
-              fontWeight: 900,
-              opacity: 0.7,
-              borderBottom: "1px solid #eee",
-            }}
-          >
-            <div>Date</div>
-            <div>Value</div>
-            <div>Difference</div>
-          </div>
+          Điện
+        </button>
+        <button
+          onClick={() => setTab("nuoc")}
+          style={{
+            padding: "8px 12px",
+            borderRadius: 10,
+            border: "1px solid rgba(0,0,0,0.18)",
+            background: tab === "nuoc" ? "rgba(0,0,0,0.08)" : "transparent",
+            cursor: "pointer",
+          }}
+        >
+          Nước
+        </button>
+      </div>
 
-          {loadingHistory && (
-            <div style={{ padding: 12, opacity: 0.7 }}>Loading…</div>
-          )}
+      <div style={{ height: 10 }} />
 
-          {!loadingHistory && historyRows.length === 0 && (
-            <div style={{ padding: 12, opacity: 0.7 }}>No history yet.</div>
-          )}
+      <div
+        style={{
+          padding: 14,
+          borderRadius: 14,
+          border: "1px solid rgba(0,0,0,0.12)",
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>History (monthly)</h2>
 
-          {!loadingHistory &&
-            historyRows.map((r) => (
+        {historyRows.length ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            {historyRows.map(({ row, dateLabel, diff }) => (
               <div
-                key={r.key}
+                key={row.id ? String(row.id) : `${row.room}-${row.date}`}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.2fr 1fr 1fr",
-                  padding: 12,
-                  borderBottom: "1px solid #f2f2f2",
-                  alignItems: "center",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  padding: 10,
+                  borderRadius: 12,
+                  background: "rgba(0,0,0,0.04)",
                 }}
               >
-                <div style={{ fontWeight: 800 }}>{r.dateText}</div>
-                <div style={{ fontWeight: 900 }}>{r.value}</div>
-                <div style={{ fontWeight: 900, opacity: 0.8 }}>
-                  {diffText(r.diff)}
+                <div>
+                  <div style={{ fontWeight: 700 }}>{dateLabel}</div>
+                  {row.note ? (
+                    <div style={{ opacity: 0.75, fontSize: 13 }}>
+                      {row.note}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontWeight: 700 }}>
+                    {tab === "dien" ? row.dien : row.nuoc}
+                  </div>
+                  <div style={{ opacity: 0.7, fontSize: 13 }}>
+                    Δ {diff === null ? "—" : diff}
+                  </div>
                 </div>
               </div>
             ))}
-        </div>
+          </div>
+        ) : (
+          <div style={{ opacity: 0.7 }}>No history yet.</div>
+        )}
       </div>
 
-      {/* Bottom sheet */}
-      {showSheet && (
+      {showSheet ? (
         <>
           <div
-            onClick={() => !saving && setShowSheet(false)}
+            onClick={() => setShowSheet(false)}
             style={{
               position: "fixed",
               inset: 0,
               background: "rgba(0,0,0,0.35)",
-              zIndex: 50,
             }}
           />
-
           <div
             style={{
               position: "fixed",
-              left: 0,
-              right: 0,
-              bottom: 0,
-              zIndex: 60,
-              background: "#fff",
-              borderTopLeftRadius: 18,
-              borderTopRightRadius: 18,
-              borderTop: "1px solid #eee",
-              padding: 16,
-              boxShadow: "0 -10px 30px rgba(0,0,0,0.12)",
-              transform: "translateY(0)",
+              left: "50%",
+              transform: "translateX(-50%)",
+              bottom: 12,
+              width: "min(560px, calc(100% - 24px))",
+              background: "white",
+              borderRadius: 16,
+              padding: 14,
+              boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
-                {buttonLabel} reading
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <b>{latest ? "Edit Reading" : "Add Reading"}</b>
+                <button onClick={() => setShowSheet(false)}>✕</button>
               </div>
-              <button
-                onClick={() => !saving && setShowSheet(false)}
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: "#fff",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
 
-            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>Điện</div>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span>Điện</span>
                 <input
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  autoComplete="off"
-                  enterKeyHint="done"
                   value={dienInput}
-                  onChange={(e) => setNumberOnly(e.target.value, setDienInput)}
-                  onKeyDown={blockNonNumericKeys}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const text = e.clipboardData.getData("text");
-                    setDienInput(digitsOnly(text));
-                  }}
-                  placeholder="Enter điện"
-                  style={{
-                    width: "100%",
-                    padding: 12,
-                    borderRadius: 10,
-                    border: "1px solid #ddd",
-                    fontSize: 16,
-                  }}
-                />
-              </label>
-
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>Nước</div>
-                <input
+                  onChange={(e) => setDienInput(e.target.value)}
                   inputMode="numeric"
-                  pattern="[0-9]*"
-                  autoComplete="off"
-                  enterKeyHint="done"
-                  value={nuocInput}
-                  onChange={(e) => setNumberOnly(e.target.value, setNuocInput)}
-                  onKeyDown={blockNonNumericKeys}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const text = e.clipboardData.getData("text");
-                    setNuocInput(digitsOnly(text));
-                  }}
-                  placeholder="Enter nước"
                   style={{
-                    width: "100%",
-                    padding: 12,
+                    padding: 10,
                     borderRadius: 10,
                     border: "1px solid #ddd",
-                    fontSize: 16,
                   }}
                 />
               </label>
 
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>
-                  Note (optional)
-                </div>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span>Nước</span>
+                <input
+                  value={nuocInput}
+                  onChange={(e) => setNuocInput(e.target.value)}
+                  inputMode="numeric"
+                  style={{
+                    padding: 10,
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                  }}
+                />
+              </label>
+
+              <label style={{ display: "grid", gap: 6 }}>
+                <span>Note (optional)</span>
                 <input
                   value={noteInput}
                   onChange={(e) => setNoteInput(e.target.value)}
-                  placeholder="Optional note"
                   style={{
-                    width: "100%",
-                    padding: 12,
+                    padding: 10,
                     borderRadius: 10,
                     border: "1px solid #ddd",
-                    fontSize: 16,
                   }}
                 />
               </label>
 
-              {msg && (
-                <div style={{ color: "#b00020", fontWeight: 800 }}>{msg}</div>
-              )}
-
               <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 10,
-                }}
+                style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}
               >
                 <button
-                  onClick={() => !saving && setShowSheet(false)}
-                  disabled={saving}
-                  style={{
-                    padding: 12,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    background: "#fff",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
+                  onClick={() => setShowSheet(false)}
+                  style={{ padding: "10px 14px", borderRadius: 10 }}
                 >
                   Cancel
                 </button>
-
                 <button
                   onClick={saveReading}
                   disabled={saving}
                   style={{
-                    padding: 12,
-                    borderRadius: 12,
-                    border: "1px solid #111",
-                    background: saving ? "#ddd" : "#111",
-                    color: saving ? "#333" : "#fff",
-                    fontWeight: 900,
+                    padding: "10px 14px",
+                    borderRadius: 10,
+                    fontWeight: 700,
                     cursor: saving ? "not-allowed" : "pointer",
                   }}
                 >
@@ -815,7 +633,7 @@ export default function RoomPage() {
             </div>
           </div>
         </>
-      )}
+      ) : null}
     </main>
   );
 }

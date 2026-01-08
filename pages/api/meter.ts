@@ -1,8 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
+const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // ✅ RESTORED (required by your Apps Script)
 
-// NEW: personal PIN list, format: "1111:Masie,2222:Brother,3333:Thuan"
+// Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
@@ -15,9 +16,7 @@ function getHeaderPin(req: NextApiRequest): string {
 }
 
 function parsePins(pinsRaw: string): Record<string, string> {
-  // "1111:Masie,2222:Brother" => { "1111": "Masie", "2222": "Brother" }
   const map: Record<string, string> = {};
-
   const items = pinsRaw
     .split(",")
     .map((s) => s.trim())
@@ -29,8 +28,8 @@ function parsePins(pinsRaw: string): Record<string, string> {
 
     const pin = item.slice(0, idx).trim();
     const name = item.slice(idx + 1).trim();
-
     if (!pin || !name) continue;
+
     map[pin] = name;
   }
 
@@ -51,6 +50,22 @@ async function fetchJson(url: string, init?: RequestInit) {
   return { status: res.status, json };
 }
 
+function buildScriptUrl(params: Record<string, string>) {
+  if (!SCRIPT_URL) throw new Error("Missing SCRIPT_URL");
+  if (!SCRIPT_TOKEN) throw new Error("Missing SCRIPT_TOKEN");
+
+  const url = new URL(SCRIPT_URL);
+  url.searchParams.set("token", SCRIPT_TOKEN); // ✅ ALWAYS include token
+
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && String(v).length) {
+      url.searchParams.set(k, String(v));
+    }
+  }
+
+  return url.toString();
+}
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ApiOk<any> | ApiErr>
@@ -59,37 +74,53 @@ export default async function handler(
     if (!SCRIPT_URL) {
       return res.status(500).json({ ok: false, error: "Missing SCRIPT_URL" });
     }
+    if (!SCRIPT_TOKEN) {
+      return res.status(500).json({ ok: false, error: "Missing SCRIPT_TOKEN" });
+    }
 
     // =========================
-    // READ (no PIN required)
+    // GET (READ): supports room + house actions
     // =========================
     if (req.method === "GET") {
-      const action = String(req.query.action || "");
+      const action = String(req.query.action || "").trim();
       const room = String(req.query.room || "").trim();
+      const house = String(req.query.house || "").trim();
+      const limit = req.query.limit ? String(req.query.limit) : "";
+      const limitPerRoom = req.query.limitPerRoom
+        ? String(req.query.limitPerRoom)
+        : "";
 
-      if (!action)
+      if (!action) {
         return res.status(400).json({ ok: false, error: "Missing action" });
-      if (!room)
+      }
+
+      const houseActions = new Set(["houseLatest", "houseHistory"]);
+      const roomActions = new Set(["latest", "history"]);
+
+      if (houseActions.has(action) && !house) {
+        return res.status(400).json({ ok: false, error: "Missing house" });
+      }
+      if (roomActions.has(action) && !room) {
         return res.status(400).json({ ok: false, error: "Missing room" });
+      }
 
-      const url = new URL(SCRIPT_URL);
-      url.searchParams.set("action", action);
-      url.searchParams.set("room", room);
+      const url = buildScriptUrl({
+        action,
+        room,
+        house,
+        limit,
+        limitPerRoom,
+      });
 
-      if (req.query.limit)
-        url.searchParams.set("limit", String(req.query.limit));
-      if (req.query.house)
-        url.searchParams.set("house", String(req.query.house));
-
-      const { status, json } = await fetchJson(url.toString());
+      const { status, json } = await fetchJson(url);
       return res.status(status).json(json);
     }
 
     // =========================
-    // WRITE (HARD LOCK: PIN REQUIRED)
+    // POST (WRITE): HARD LOCK + personal PIN attribution
     // =========================
     if (req.method === "POST") {
-      // 🔒 HARD LOCK: server MUST be configured with VTPT_PINS
+      // Hard lock personal PINs
       if (!VTPT_PINS) {
         return res.status(500).json({
           ok: false,
@@ -103,7 +134,7 @@ export default async function handler(
         return res.status(500).json({
           ok: false,
           error:
-            "Server not configured: VTPT_PINS is empty/invalid (expected format '1111:Masie,2222:Brother').",
+            "Server not configured: VTPT_PINS is empty/invalid (expected '1111:Masie,2222:Brother').",
         });
       }
 
@@ -126,10 +157,11 @@ export default async function handler(
       if (!Number.isFinite(Number(nuoc)))
         return res.status(400).json({ ok: false, error: "Invalid nuoc" });
 
-      // Low-key attribution with no sheet changes:
-      // prepend [Name] to note
+      // low-key audit inside note
       const noteStr = typeof note === "string" ? note.trim() : "";
       const attributedNote = noteStr ? `[${actor}] ${noteStr}` : `[${actor}]`;
+
+      const url = buildScriptUrl({}); // token included
 
       const payload = {
         action: "save",
@@ -139,7 +171,7 @@ export default async function handler(
         note: attributedNote,
       };
 
-      const { status, json } = await fetchJson(SCRIPT_URL, {
+      const { status, json } = await fetchJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

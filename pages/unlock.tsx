@@ -15,10 +15,46 @@ export default function UnlockPage() {
   const [digits, setDigits] = useState<string[]>(Array(PIN_LENGTH).fill(""));
   const [error, setError] = useState<string | null>(null);
   const [redirectTo, setRedirectTo] = useState<string>("/");
+  const [checking, setChecking] = useState(false);
 
   const inputsRef = useRef<Array<HTMLInputElement | null>>([]);
-
   const pin = useMemo(() => digits.join(""), [digits]);
+
+  function focusIndex(i: number) {
+    const idx = Math.max(0, Math.min(PIN_LENGTH - 1, i));
+    inputsRef.current[idx]?.focus();
+    inputsRef.current[idx]?.select?.();
+  }
+
+  async function validatePinAndEnter(pinToCheck: string, next: string) {
+    setChecking(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: pinToCheck }),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json?.ok) {
+        sessionStorage.removeItem(PIN_STORAGE_KEY);
+        setError(json?.error || "Wrong PIN");
+        setChecking(false);
+        focusIndex(0);
+        return;
+      }
+
+      // ✅ valid
+      sessionStorage.setItem(PIN_STORAGE_KEY, pinToCheck);
+      router.replace(next);
+    } catch (e: any) {
+      setError("Network error. Try again.");
+      setChecking(false);
+    }
+  }
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -27,44 +63,32 @@ export default function UnlockPage() {
       typeof router.query.next === "string" ? router.query.next : "/";
     setRedirectTo(next);
 
-    // If already unlocked in this tab, go straight through
+    // If a PIN already exists, validate it (prevents old wrong PIN from “working”)
     const existing = (sessionStorage.getItem(PIN_STORAGE_KEY) || "").trim();
     if (existing) {
-      router.replace(next);
+      validatePinAndEnter(existing, next);
       return;
     }
 
-    // Focus first box
     setTimeout(() => inputsRef.current[0]?.focus(), 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady]);
 
-  function focusIndex(i: number) {
-    const idx = Math.max(0, Math.min(PIN_LENGTH - 1, i));
-    inputsRef.current[idx]?.focus();
-    inputsRef.current[idx]?.select?.();
-  }
-
   function updateDigitAt(index: number, value: string) {
     const d = onlyDigits(value);
 
-    // Handle paste / multi-digit input
+    // paste / multi-digit
     if (d.length > 1) {
       const nextDigits = [...digits];
       let writeAt = index;
-
       for (const ch of d) {
         if (writeAt >= PIN_LENGTH) break;
         nextDigits[writeAt] = ch;
         writeAt++;
       }
-
       setDigits(nextDigits);
       setError(null);
-
-      if (writeAt >= PIN_LENGTH) focusIndex(PIN_LENGTH - 1);
-      else focusIndex(writeAt);
-
+      focusIndex(Math.min(PIN_LENGTH - 1, writeAt));
       return;
     }
 
@@ -120,9 +144,14 @@ export default function UnlockPage() {
     const text = e.clipboardData.getData("text");
     const d = onlyDigits(text);
     if (!d) return;
-
     e.preventDefault();
     updateDigitAt(index, d);
+  }
+
+  function clearPin() {
+    setDigits(Array(PIN_LENGTH).fill(""));
+    setError(null);
+    focusIndex(0);
   }
 
   function unlock() {
@@ -132,15 +161,7 @@ export default function UnlockPage() {
       focusIndex(firstEmpty === -1 ? PIN_LENGTH - 1 : firstEmpty);
       return;
     }
-
-    sessionStorage.setItem(PIN_STORAGE_KEY, pin);
-    router.replace(redirectTo);
-  }
-
-  function clearPin() {
-    setDigits(Array(PIN_LENGTH).fill(""));
-    setError(null);
-    focusIndex(0);
+    validatePinAndEnter(pin, redirectTo);
   }
 
   return (
@@ -188,6 +209,7 @@ export default function UnlockPage() {
 
           <button
             onClick={clearPin}
+            disabled={checking}
             style={{
               padding: "8px 12px",
               borderRadius: 12,
@@ -197,6 +219,7 @@ export default function UnlockPage() {
               height: 40,
               boxSizing: "border-box",
               fontWeight: 600,
+              opacity: checking ? 0.6 : 1,
             }}
           >
             Clear
@@ -222,8 +245,7 @@ export default function UnlockPage() {
                 <input
                   key={i}
                   ref={(el) => {
-                    // ✅ IMPORTANT: do not return anything from ref callback
-                    inputsRef.current[i] = el;
+                    inputsRef.current[i] = el; // ✅ no return
                   }}
                   value={val}
                   onChange={(e) => updateDigitAt(i, e.target.value)}
@@ -232,6 +254,7 @@ export default function UnlockPage() {
                   inputMode="numeric"
                   pattern="[0-9]*"
                   aria-label={`PIN digit ${i + 1}`}
+                  disabled={checking}
                   style={{
                     width: "100%",
                     height: 64,
@@ -244,6 +267,7 @@ export default function UnlockPage() {
                     fontWeight: 700,
                     outline: "none",
                     boxSizing: "border-box",
+                    opacity: checking ? 0.7 : 1,
                   }}
                 />
               ))}
@@ -263,6 +287,7 @@ export default function UnlockPage() {
 
         <button
           onClick={unlock}
+          disabled={checking}
           style={{
             marginTop: 22,
             width: "100%",
@@ -273,11 +298,12 @@ export default function UnlockPage() {
             color: "white",
             fontSize: 16,
             fontWeight: 800,
-            cursor: "pointer",
+            cursor: checking ? "not-allowed" : "pointer",
             boxSizing: "border-box",
+            opacity: checking ? 0.7 : 1,
           }}
         >
-          Unlock
+          {checking ? "Checking..." : "Unlock"}
         </button>
 
         <div style={{ marginTop: 12, fontSize: 12, opacity: 0.6 }}>

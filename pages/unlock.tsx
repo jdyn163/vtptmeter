@@ -11,21 +11,30 @@ function onlyDigits(s: string) {
 
 export default function UnlockPage() {
   const router = useRouter();
+
   const [digits, setDigits] = useState<string[]>(Array(PIN_LENGTH).fill(""));
   const [error, setError] = useState<string | null>(null);
   const [redirectTo, setRedirectTo] = useState<string>("/");
 
   const inputsRef = useRef<Array<HTMLInputElement | null>>([]);
+
   const pin = useMemo(() => digits.join(""), [digits]);
 
   useEffect(() => {
+    if (!router.isReady) return;
+
     const next =
       typeof router.query.next === "string" ? router.query.next : "/";
     setRedirectTo(next);
 
+    // If already unlocked in this tab, go straight through
     const existing = (sessionStorage.getItem(PIN_STORAGE_KEY) || "").trim();
-    if (existing) router.replace(next);
+    if (existing) {
+      router.replace(next);
+      return;
+    }
 
+    // Focus first box
     setTimeout(() => inputsRef.current[0]?.focus(), 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router.isReady]);
@@ -38,41 +47,55 @@ export default function UnlockPage() {
 
   function updateDigitAt(index: number, value: string) {
     const d = onlyDigits(value);
-    const next = [...digits];
 
-    // Paste / multi-digit handling
+    // Handle paste / multi-digit input
     if (d.length > 1) {
-      let i = index;
+      const nextDigits = [...digits];
+      let writeAt = index;
+
       for (const ch of d) {
-        if (i >= PIN_LENGTH) break;
-        next[i++] = ch;
+        if (writeAt >= PIN_LENGTH) break;
+        nextDigits[writeAt] = ch;
+        writeAt++;
       }
-      setDigits(next);
+
+      setDigits(nextDigits);
       setError(null);
-      focusIndex(Math.min(PIN_LENGTH - 1, index + d.length));
+
+      if (writeAt >= PIN_LENGTH) focusIndex(PIN_LENGTH - 1);
+      else focusIndex(writeAt);
+
       return;
     }
 
-    next[index] = d.slice(0, 1);
-    setDigits(next);
+    const nextDigits = [...digits];
+    nextDigits[index] = d.slice(0, 1);
+    setDigits(nextDigits);
     setError(null);
+
     if (d && index < PIN_LENGTH - 1) focusIndex(index + 1);
   }
 
   function onKeyDown(index: number, e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Backspace") {
-      const next = [...digits];
-      if (next[index]) {
-        next[index] = "";
-        setDigits(next);
-      } else if (index > 0) {
-        next[index - 1] = "";
-        setDigits(next);
-        focusIndex(index - 1);
+      const nextDigits = [...digits];
+
+      if (nextDigits[index]) {
+        nextDigits[index] = "";
+        setDigits(nextDigits);
+        setError(null);
+        e.preventDefault();
+        return;
       }
-      setError(null);
-      e.preventDefault();
-      return;
+
+      if (index > 0) {
+        nextDigits[index - 1] = "";
+        setDigits(nextDigits);
+        setError(null);
+        focusIndex(index - 1);
+        e.preventDefault();
+        return;
+      }
     }
 
     if (e.key === "ArrowLeft") {
@@ -97,16 +120,19 @@ export default function UnlockPage() {
     const text = e.clipboardData.getData("text");
     const d = onlyDigits(text);
     if (!d) return;
+
     e.preventDefault();
     updateDigitAt(index, d);
   }
 
   function unlock() {
     if (digits.some((d) => !d)) {
-      setError(`PIN must be ${PIN_LENGTH} digits`);
-      focusIndex(digits.findIndex((x) => !x));
+      setError(`PIN must be exactly ${PIN_LENGTH} digits.`);
+      const firstEmpty = digits.findIndex((x) => !x);
+      focusIndex(firstEmpty === -1 ? PIN_LENGTH - 1 : firstEmpty);
       return;
     }
+
     sessionStorage.setItem(PIN_STORAGE_KEY, pin);
     router.replace(redirectTo);
   }
@@ -139,12 +165,17 @@ export default function UnlockPage() {
           padding: 24,
           background: "#fff",
           boxShadow: "0 20px 60px rgba(0,0,0,0.12)",
-          overflow: "hidden", // ✅ nothing can spill outside visually
+          overflow: "hidden",
           boxSizing: "border-box",
         }}
       >
         <div
-          style={{ display: "flex", justifyContent: "space-between", gap: 12 }}
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 12,
+          }}
         >
           <div>
             <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>
@@ -164,8 +195,8 @@ export default function UnlockPage() {
               background: "transparent",
               cursor: "pointer",
               height: 40,
-              alignSelf: "start",
               boxSizing: "border-box",
+              fontWeight: 600,
             }}
           >
             Clear
@@ -174,19 +205,14 @@ export default function UnlockPage() {
 
         <div style={{ height: 22 }} />
 
-        {/* PIN row wrapper ensures safe width */}
         <div style={{ display: "flex", justifyContent: "center" }}>
           <div
-            style={{
-              width: "100%",
-              maxWidth: 320, // ✅ hard limit
-              boxSizing: "border-box",
-            }}
+            style={{ width: "100%", maxWidth: 320, boxSizing: "border-box" }}
           >
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: `repeat(${PIN_LENGTH}, minmax(0, 1fr))`, // ✅ prevents overflow
+                gridTemplateColumns: `repeat(${PIN_LENGTH}, minmax(0, 1fr))`,
                 gap: 12,
                 width: "100%",
                 boxSizing: "border-box",
@@ -195,7 +221,10 @@ export default function UnlockPage() {
               {digits.map((val, i) => (
                 <input
                   key={i}
-                  ref={(el) => (inputsRef.current[i] = el)}
+                  ref={(el) => {
+                    // ✅ IMPORTANT: do not return anything from ref callback
+                    inputsRef.current[i] = el;
+                  }}
                   value={val}
                   onChange={(e) => updateDigitAt(i, e.target.value)}
                   onKeyDown={(e) => onKeyDown(i, e)}
@@ -204,7 +233,7 @@ export default function UnlockPage() {
                   pattern="[0-9]*"
                   aria-label={`PIN digit ${i + 1}`}
                   style={{
-                    width: "100%", // ✅ important
+                    width: "100%",
                     height: 64,
                     borderRadius: 16,
                     border: error
@@ -214,7 +243,7 @@ export default function UnlockPage() {
                     fontSize: 26,
                     fontWeight: 700,
                     outline: "none",
-                    boxSizing: "border-box", // ✅ important
+                    boxSizing: "border-box",
                   }}
                 />
               ))}
@@ -243,7 +272,7 @@ export default function UnlockPage() {
             background: "#111827",
             color: "white",
             fontSize: 16,
-            fontWeight: 700,
+            fontWeight: 800,
             cursor: "pointer",
             boxSizing: "border-box",
           }}

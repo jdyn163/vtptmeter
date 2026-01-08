@@ -1,7 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
-const VTPT_PIN = process.env.VTPT_PIN;
+
+// NEW: personal PIN list, format: "1111:Masie,2222:Brother,3333:Thuan"
+const VTPT_PINS = process.env.VTPT_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string };
@@ -10,6 +12,29 @@ function getHeaderPin(req: NextApiRequest): string {
   const raw = req.headers["x-vtpt-pin"];
   const pin = Array.isArray(raw) ? raw[0] : raw;
   return (pin || "").trim();
+}
+
+function parsePins(pinsRaw: string): Record<string, string> {
+  // "1111:Masie,2222:Brother" => { "1111": "Masie", "2222": "Brother" }
+  const map: Record<string, string> = {};
+
+  const items = pinsRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const item of items) {
+    const idx = item.indexOf(":");
+    if (idx === -1) continue;
+
+    const pin = item.slice(0, idx).trim();
+    const name = item.slice(idx + 1).trim();
+
+    if (!pin || !name) continue;
+    map[pin] = name;
+  }
+
+  return map;
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
@@ -64,17 +89,28 @@ export default async function handler(
     // WRITE (HARD LOCK: PIN REQUIRED)
     // =========================
     if (req.method === "POST") {
-      // 🔒 HARD LOCK: server MUST be configured with a PIN
-      if (!VTPT_PIN) {
+      // 🔒 HARD LOCK: server MUST be configured with VTPT_PINS
+      if (!VTPT_PINS) {
         return res.status(500).json({
           ok: false,
           error:
-            "Server not configured: VTPT_PIN is missing. Writes are disabled.",
+            "Server not configured: VTPT_PINS is missing. Writes are disabled.",
+        });
+      }
+
+      const pins = parsePins(VTPT_PINS);
+      if (!Object.keys(pins).length) {
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Server not configured: VTPT_PINS is empty/invalid (expected format '1111:Masie,2222:Brother').",
         });
       }
 
       const pin = getHeaderPin(req);
-      if (!pin || pin !== VTPT_PIN) {
+      const actor = pin ? pins[pin] : undefined;
+
+      if (!actor) {
         return res
           .status(401)
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
@@ -90,12 +126,17 @@ export default async function handler(
       if (!Number.isFinite(Number(nuoc)))
         return res.status(400).json({ ok: false, error: "Invalid nuoc" });
 
+      // Low-key attribution with no sheet changes:
+      // prepend [Name] to note
+      const noteStr = typeof note === "string" ? note.trim() : "";
+      const attributedNote = noteStr ? `[${actor}] ${noteStr}` : `[${actor}]`;
+
       const payload = {
         action: "save",
         room: roomStr,
         dien: Number(dien),
         nuoc: Number(nuoc),
-        note: typeof note === "string" ? note : "",
+        note: attributedNote,
       };
 
       const { status, json } = await fetchJson(SCRIPT_URL, {

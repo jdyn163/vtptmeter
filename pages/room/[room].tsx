@@ -1,5 +1,7 @@
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
+import type React from "react";
+import BottomSheet from "../../components/BottomSheet";
 
 type Reading = {
   room: string;
@@ -137,6 +139,58 @@ function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
 }
 // ----------------------------------------------------------------
 
+function Field({
+  label,
+  value,
+  onChange,
+  onKeyDown,
+  onPaste,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => void;
+  placeholder: string;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ fontWeight: 800, marginLeft: 2 }}>{label}</div>
+
+      {/* The "real app" box */}
+      <div
+        style={{
+          background: "#fff",
+          border: "1px solid #ddd",
+          borderRadius: 12,
+          padding: "2px 4px",
+        }}
+      >
+        <input
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="off"
+          enterKeyHint="done"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          onPaste={onPaste}
+          placeholder={placeholder}
+          style={{
+            width: "100%",
+            padding: 12,
+            border: "none",
+            outline: "none",
+            fontSize: 16,
+            background: "transparent",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function RoomPage() {
   const router = useRouter();
   const room = (router.query.room as string) || "";
@@ -229,7 +283,7 @@ export default function RoomPage() {
 
       loadFromCaches();
     } catch {
-      // ignore; cache UI still works
+      // ignore
     }
   }
 
@@ -273,11 +327,11 @@ export default function RoomPage() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setShowSheet(false);
+      if (e.key === "Escape" && !saving) setShowSheet(false);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [saving]);
 
   const buttonLabel = latest ? "Edit" : "Add";
 
@@ -296,7 +350,6 @@ export default function RoomPage() {
     }
   }
 
-  // ✅ NEW: both meter cards are tappable (and keyboard-friendly)
   const canTapCard = !saving && !loadingLatest && !!room && !!house;
 
   function onMeterCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
@@ -386,7 +439,6 @@ export default function RoomPage() {
 
   const historyRows = useMemo(() => {
     const list = Array.isArray(history) ? history : [];
-
     return list.map((row, idx) => {
       const currVal = tab === "dien" ? Number(row.dien) : Number(row.nuoc);
       const nextOlder = list[idx + 1];
@@ -398,7 +450,6 @@ export default function RoomPage() {
 
       const diff = prevVal === null ? null : currVal - prevVal;
 
-      // ✅ NEW: color for diff
       const diffColor =
         diff === null
           ? undefined
@@ -475,7 +526,6 @@ export default function RoomPage() {
         </div>
 
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
-          {/* ✅ Electric Meter box is tappable */}
           <div
             onClick={() => canTapCard && openSheet()}
             onKeyDown={onMeterCardKeyDown}
@@ -491,14 +541,7 @@ export default function RoomPage() {
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 34,
-                fontWeight: 900,
-                letterSpacing: -1,
-              }}
-            >
+            <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latest ? latest.dien : "— — —"}
               <span
                 style={{
@@ -513,7 +556,6 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {/* ✅ Water Meter box is tappable */}
           <div
             onClick={() => canTapCard && openSheet()}
             onKeyDown={onMeterCardKeyDown}
@@ -529,14 +571,7 @@ export default function RoomPage() {
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 34,
-                fontWeight: 900,
-                letterSpacing: -1,
-              }}
-            >
+            <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latest ? latest.nuoc : "— — —"}
               <span
                 style={{
@@ -550,8 +585,6 @@ export default function RoomPage() {
               </span>
             </div>
           </div>
-
-          {/* ✅ Removed Edit/Add button */}
         </div>
       </div>
 
@@ -639,15 +672,7 @@ export default function RoomPage() {
               >
                 <div style={{ fontWeight: 800 }}>{r.dateText}</div>
                 <div style={{ fontWeight: 900 }}>{r.value}</div>
-
-                {/* ✅ NEW: colorize diff */}
-                <div
-                  style={{
-                    fontWeight: 900,
-                    opacity: 0.95,
-                    color: r.diffColor,
-                  }}
-                >
+                <div style={{ fontWeight: 900, color: r.diffColor }}>
                   {diffText(r.diff)}
                 </div>
               </div>
@@ -655,174 +680,109 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {showSheet && (
-        <>
-          <div
-            onClick={() => !saving && setShowSheet(false)}
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "rgba(0,0,0,0.35)",
-              zIndex: 50,
+      <BottomSheet
+        open={showSheet}
+        title={`${buttonLabel} reading`}
+        onClose={() => {
+          if (!saving) setShowSheet(false);
+        }}
+        disabled={saving}
+      >
+        <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+          <Field
+            label="Điện"
+            value={dienInput}
+            onChange={(raw) => setNumberOnly(raw, setDienInput)}
+            onKeyDown={blockNonNumericKeys}
+            onPaste={(e) => {
+              e.preventDefault();
+              setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
+            placeholder="Enter điện"
           />
 
-          <div
-            style={{
-              position: "fixed",
-              left: 0,
-              right: 0,
-              bottom: 0,
-              zIndex: 60,
-              background: "#fff",
-              borderTopLeftRadius: 18,
-              borderTopRightRadius: 18,
-              borderTop: "1px solid #eee",
-              padding: 16,
-              boxShadow: "0 -10px 30px rgba(0,0,0,0.12)",
-              transform: "translateY(0)",
+          <Field
+            label="Nước"
+            value={nuocInput}
+            onChange={(raw) => setNumberOnly(raw, setNuocInput)}
+            onKeyDown={blockNonNumericKeys}
+            onPaste={(e) => {
+              e.preventDefault();
+              setNuocInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
-                {buttonLabel} reading
-              </div>
-              <button
-                onClick={() => !saving && setShowSheet(false)}
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: "#fff",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-                aria-label="Close"
-              >
-                ×
-              </button>
+            placeholder="Enter nước"
+          />
+
+          <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ fontWeight: 800, marginLeft: 2 }}>
+              Note (optional)
             </div>
-
-            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>Điện</div>
-                <input
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  autoComplete="off"
-                  enterKeyHint="done"
-                  value={dienInput}
-                  onChange={(e) => setNumberOnly(e.target.value, setDienInput)}
-                  onKeyDown={blockNonNumericKeys}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const text = e.clipboardData.getData("text");
-                    setDienInput(digitsOnly(text));
-                  }}
-                  placeholder="Enter điện"
-                  style={{
-                    width: "100%",
-                    padding: 12,
-                    borderRadius: 10,
-                    border: "1px solid #ddd",
-                    fontSize: 16,
-                  }}
-                />
-              </label>
-
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>Nước</div>
-                <input
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  autoComplete="off"
-                  enterKeyHint="done"
-                  value={nuocInput}
-                  onChange={(e) => setNumberOnly(e.target.value, setNuocInput)}
-                  onKeyDown={blockNonNumericKeys}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const text = e.clipboardData.getData("text");
-                    setNuocInput(digitsOnly(text));
-                  }}
-                  placeholder="Enter nước"
-                  style={{
-                    width: "100%",
-                    padding: 12,
-                    borderRadius: 10,
-                    border: "1px solid #ddd",
-                    fontSize: 16,
-                  }}
-                />
-              </label>
-
-              <label>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>
-                  Note (optional)
-                </div>
-                <input
-                  value={noteInput}
-                  onChange={(e) => setNoteInput(e.target.value)}
-                  placeholder="Optional note"
-                  style={{
-                    width: "100%",
-                    padding: 12,
-                    borderRadius: 10,
-                    border: "1px solid #ddd",
-                    fontSize: 16,
-                  }}
-                />
-              </label>
-
-              {msg && (
-                <div style={{ color: "#b00020", fontWeight: 800 }}>{msg}</div>
-              )}
-
-              <div
+            <div
+              style={{
+                background: "#fff",
+                border: "1px solid #ddd",
+                borderRadius: 12,
+                padding: "2px 4px",
+              }}
+            >
+              <input
+                value={noteInput}
+                onChange={(e) => setNoteInput(e.target.value)}
+                placeholder="Optional note"
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr",
-                  gap: 10,
+                  width: "100%",
+                  padding: 12,
+                  border: "none",
+                  outline: "none",
+                  fontSize: 16,
+                  background: "transparent",
                 }}
-              >
-                <button
-                  onClick={() => !saving && setShowSheet(false)}
-                  disabled={saving}
-                  style={{
-                    padding: 12,
-                    borderRadius: 12,
-                    border: "1px solid #ddd",
-                    background: "#fff",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                >
-                  Cancel
-                </button>
-
-                <button
-                  onClick={saveReading}
-                  disabled={saving}
-                  style={{
-                    padding: 12,
-                    borderRadius: 12,
-                    border: "1px solid #111",
-                    background: saving ? "#ddd" : "#111",
-                    color: saving ? "#333" : "#fff",
-                    fontWeight: 900,
-                    cursor: saving ? "not-allowed" : "pointer",
-                  }}
-                >
-                  {saving ? "Saving..." : "Save"}
-                </button>
-              </div>
-
-              <div style={{ height: 6 }} />
+              />
             </div>
           </div>
-        </>
-      )}
+
+          {msg && (
+            <div style={{ color: "#b00020", fontWeight: 800 }}>{msg}</div>
+          )}
+
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+          >
+            <button
+              onClick={() => !saving && setShowSheet(false)}
+              disabled={saving}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+
+            <button
+              onClick={saveReading}
+              disabled={saving}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #111",
+                background: saving ? "#ddd" : "#111",
+                color: saving ? "#333" : "#fff",
+                fontWeight: 900,
+                cursor: saving ? "not-allowed" : "pointer",
+              }}
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+          </div>
+
+          <div style={{ height: 6 }} />
+        </div>
+      </BottomSheet>
     </main>
   );
 }

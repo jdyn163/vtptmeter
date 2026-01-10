@@ -20,15 +20,15 @@ export default function Home() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <h1 style={{ fontSize: 22, fontWeight: 700 }}>VTPT Meter</h1>
+      <h1 style={{ marginBottom: 12 }}>VTPT Meter</h1>
 
-      <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+      <div style={{ display: "grid", gap: 10 }}>
         {houses.map((house) => (
           <Link
             key={house}
-            href={`/house/${house}`}
+            href={`/house/${encodeURIComponent(house)}`}
             style={{
-              padding: 16,
+              padding: 14,
               border: "1px solid #ddd",
               borderRadius: 12,
               textDecoration: "none",
@@ -36,7 +36,7 @@ export default function Home() {
               background: "#fff",
             }}
           >
-            <div style={{ fontWeight: 600 }}> {house}</div>
+            <div style={{ fontWeight: 600 }}>{house}</div>
           </Link>
         ))}
       </div>

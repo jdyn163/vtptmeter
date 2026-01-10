@@ -281,6 +281,9 @@ export default function RoomPage() {
 
   const buttonLabel = latest ? "Edit" : "Add";
 
+  // ✅ NEW: whole-card tap behavior (same as house tiles)
+  const canOpenSheet = !loadingLatest && !!room && !!house && !saving;
+
   function openSheet() {
     setMsg(null);
     setShowSheet(true);
@@ -294,6 +297,33 @@ export default function RoomPage() {
       setNuocInput("");
       setNoteInput("");
     }
+  }
+
+  function cardA11yProps(label: string) {
+    const baseStyle: React.CSSProperties = {
+      cursor: canOpenSheet ? "pointer" : "not-allowed",
+      userSelect: "none",
+      transition: "transform 0.05s ease",
+    };
+
+    return {
+      role: "button" as const,
+      tabIndex: canOpenSheet ? 0 : -1,
+      "aria-disabled": !canOpenSheet,
+      "aria-label": label,
+      onClick: () => {
+        if (!canOpenSheet) return;
+        openSheet();
+      },
+      onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!canOpenSheet) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSheet();
+        }
+      },
+      style: baseStyle,
+    };
   }
 
   async function saveReading() {
@@ -387,6 +417,16 @@ export default function RoomPage() {
 
       const diff = prevVal === null ? null : currVal - prevVal;
 
+      // ✅ NEW: color for diff
+      const diffColor =
+        diff === null
+          ? undefined
+          : diff > 0
+          ? "#16a34a"
+          : diff < 0
+          ? "#dc2626"
+          : undefined;
+
       const d = new Date(row.date);
       const safeDate = isNaN(d.getTime()) ? null : d;
 
@@ -395,6 +435,7 @@ export default function RoomPage() {
         dateText: safeDate ? formatDateShort(safeDate) : String(row.date),
         value: currVal,
         diff,
+        diffColor,
       };
     });
   }, [history, tab]);
@@ -453,12 +494,15 @@ export default function RoomPage() {
         </div>
 
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
+          {/* ✅ Electric card: whole box clickable */}
           <div
+            {...cardA11yProps("Edit/Add Electric Meter reading")}
             style={{
               background: "#fff",
               border: "1px solid #e5e5e5",
               borderRadius: 14,
               padding: 16,
+              ...(cardA11yProps("").style as React.CSSProperties),
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
@@ -482,14 +526,21 @@ export default function RoomPage() {
                 kWh
               </span>
             </div>
+
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.55 }}>
+              Tap to {latest ? "edit" : "add"}
+            </div>
           </div>
 
+          {/* ✅ Water card: whole box clickable */}
           <div
+            {...cardA11yProps("Edit/Add Water Meter reading")}
             style={{
               background: "#fff",
               border: "1px solid #e5e5e5",
               borderRadius: 14,
               padding: 16,
+              ...(cardA11yProps("").style as React.CSSProperties),
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
@@ -513,24 +564,13 @@ export default function RoomPage() {
                 m³
               </span>
             </div>
+
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.55 }}>
+              Tap to {latest ? "edit" : "add"}
+            </div>
           </div>
 
-          <button
-            onClick={openSheet}
-            disabled={loadingLatest || !room || !house}
-            style={{
-              width: "100%",
-              padding: 14,
-              borderRadius: 14,
-              border: "1px solid #111",
-              background: "#111",
-              color: "#fff",
-              fontWeight: 900,
-              cursor: loadingLatest ? "not-allowed" : "pointer",
-            }}
-          >
-            {buttonLabel}
-          </button>
+          {/* ✅ Removed the old Edit/Add button */}
         </div>
       </div>
 
@@ -618,7 +658,15 @@ export default function RoomPage() {
               >
                 <div style={{ fontWeight: 800 }}>{r.dateText}</div>
                 <div style={{ fontWeight: 900 }}>{r.value}</div>
-                <div style={{ fontWeight: 900, opacity: 0.8 }}>
+
+                {/* ✅ NEW: colorize diff */}
+                <div
+                  style={{
+                    fontWeight: 900,
+                    opacity: 0.95,
+                    color: r.diffColor,
+                  }}
+                >
                   {diffText(r.diff)}
                 </div>
               </div>

@@ -20,7 +20,7 @@ export default function Home() {
         fontFamily: "system-ui, sans-serif",
       }}
     >
-      <h1 style={{ fontSize: 22, fontWeight: 700 }}>vtpt</h1>
+      <h1 style={{ fontSize: 22, fontWeight: 700 }}>VTPT Meter</h1>
 
       <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
         {houses.map((house) => (
@@ -36,7 +36,7 @@ export default function Home() {
               background: "#fff",
             }}
           >
-            <div style={{ fontWeight: 600 }}>{house}</div>
+            <div style={{ fontWeight: 600 }}> {house}</div>
           </Link>
         ))}
       </div>

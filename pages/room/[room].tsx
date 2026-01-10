@@ -1,4 +1,5 @@
 import { useRouter } from "next/router";
+import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 
 type Reading = {
@@ -151,6 +152,8 @@ export default function RoomPage() {
   const [tab, setTab] = useState<"dien" | "nuoc">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
+  const [sheetVisible, setSheetVisible] = useState(false);
+
   const [dienInput, setDienInput] = useState("");
   const [nuocInput, setNuocInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
@@ -258,6 +261,8 @@ export default function RoomPage() {
     if (!room) return;
 
     setShowSheet(false);
+    setSheetVisible(false);
+
     setDienInput("");
     setNuocInput("");
     setNoteInput("");
@@ -271,22 +276,40 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
+  function closeSheet(force = false) {
+    if (saving && !force) return;
+    setSheetVisible(false);
+    window.setTimeout(() => setShowSheet(false), 220);
+  }
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setShowSheet(false);
+      if (e.key === "Escape") closeSheet();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving]);
 
   const buttonLabel = latest ? "Edit" : "Add";
 
-  // ✅ NEW: whole-card tap behavior (same as house tiles)
+  // ✅ Whole-card tap behavior
   const canOpenSheet = !loadingLatest && !!room && !!house && !saving;
+
+  const cardInteractiveStyle: React.CSSProperties = {
+    cursor: canOpenSheet ? "pointer" : "not-allowed",
+    userSelect: "none",
+    transition: "transform 0.05s ease",
+  };
 
   function openSheet() {
     setMsg(null);
     setShowSheet(true);
+
+    // allow DOM to mount before animating in
+    requestAnimationFrame(() => {
+      setSheetVisible(true);
+    });
 
     if (latest) {
       setDienInput(String(latest.dien ?? ""));
@@ -300,12 +323,6 @@ export default function RoomPage() {
   }
 
   function cardA11yProps(label: string) {
-    const baseStyle: React.CSSProperties = {
-      cursor: canOpenSheet ? "pointer" : "not-allowed",
-      userSelect: "none",
-      transition: "transform 0.05s ease",
-    };
-
     return {
       role: "button" as const,
       tabIndex: canOpenSheet ? 0 : -1,
@@ -322,7 +339,6 @@ export default function RoomPage() {
           openSheet();
         }
       },
-      style: baseStyle,
     };
   }
 
@@ -337,8 +353,9 @@ export default function RoomPage() {
       return;
     }
 
+    // animate out when saving
+    closeSheet(true);
     setSaving(true);
-    setShowSheet(false);
 
     const optimistic: Reading = {
       room,
@@ -417,7 +434,6 @@ export default function RoomPage() {
 
       const diff = prevVal === null ? null : currVal - prevVal;
 
-      // ✅ NEW: color for diff
       const diffColor =
         diff === null
           ? undefined
@@ -502,7 +518,7 @@ export default function RoomPage() {
               border: "1px solid #e5e5e5",
               borderRadius: 14,
               padding: 16,
-              ...(cardA11yProps("").style as React.CSSProperties),
+              ...cardInteractiveStyle,
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
@@ -526,10 +542,6 @@ export default function RoomPage() {
                 kWh
               </span>
             </div>
-
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.55 }}>
-              Tap to {latest ? "edit" : "add"}
-            </div>
           </div>
 
           {/* ✅ Water card: whole box clickable */}
@@ -540,7 +552,7 @@ export default function RoomPage() {
               border: "1px solid #e5e5e5",
               borderRadius: 14,
               padding: 16,
-              ...(cardA11yProps("").style as React.CSSProperties),
+              ...cardInteractiveStyle,
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
@@ -563,10 +575,6 @@ export default function RoomPage() {
               >
                 m³
               </span>
-            </div>
-
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.55 }}>
-              Tap to {latest ? "edit" : "add"}
             </div>
           </div>
 
@@ -659,7 +667,6 @@ export default function RoomPage() {
                 <div style={{ fontWeight: 800 }}>{r.dateText}</div>
                 <div style={{ fontWeight: 900 }}>{r.value}</div>
 
-                {/* ✅ NEW: colorize diff */}
                 <div
                   style={{
                     fontWeight: 900,
@@ -676,16 +683,20 @@ export default function RoomPage() {
 
       {showSheet && (
         <>
+          {/* Backdrop */}
           <div
-            onClick={() => !saving && setShowSheet(false)}
+            onClick={() => closeSheet()}
             style={{
               position: "fixed",
               inset: 0,
               background: "rgba(0,0,0,0.35)",
               zIndex: 50,
+              opacity: sheetVisible ? 1 : 0,
+              transition: "opacity 0.2s ease",
             }}
           />
 
+          {/* Bottom Sheet */}
           <div
             style={{
               position: "fixed",
@@ -699,7 +710,11 @@ export default function RoomPage() {
               borderTop: "1px solid #eee",
               padding: 16,
               boxShadow: "0 -10px 30px rgba(0,0,0,0.12)",
-              transform: "translateY(0)",
+
+              transform: sheetVisible ? "translateY(0)" : "translateY(16px)",
+              opacity: sheetVisible ? 1 : 0,
+              transition: "transform 0.22s ease, opacity 0.22s ease",
+              willChange: "transform, opacity",
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -707,7 +722,7 @@ export default function RoomPage() {
                 {buttonLabel} reading
               </div>
               <button
-                onClick={() => !saving && setShowSheet(false)}
+                onClick={() => closeSheet()}
                 style={{
                   width: 34,
                   height: 34,
@@ -806,7 +821,7 @@ export default function RoomPage() {
                 }}
               >
                 <button
-                  onClick={() => !saving && setShowSheet(false)}
+                  onClick={() => closeSheet()}
                   disabled={saving}
                   style={{
                     padding: 12,

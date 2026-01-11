@@ -6,8 +6,8 @@ import BottomSheet from "../../components/BottomSheet";
 type Reading = {
   room: string;
   date: string;
-  dien: number;
-  nuoc: number;
+  dien?: number | null;
+  nuoc?: number | null;
   id: number;
   note?: string;
 };
@@ -156,6 +156,18 @@ function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
   if (e.ctrlKey || e.metaKey) return;
   if (/^\d$/.test(e.key)) return;
   e.preventDefault();
+}
+
+function parseOptionalNumberFromInput(s: string): number | null {
+  const raw = String(s ?? "").trim();
+  if (!raw.length) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getReadingValue(row: Reading, tab: "dien" | "nuoc"): number | null {
+  const v = tab === "dien" ? row.dien : row.nuoc;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 // ----------------------------------------------------------------
 
@@ -369,7 +381,6 @@ export default function RoomPage() {
 
     loadFromCaches();
     backgroundRefreshIfStale();
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
@@ -389,8 +400,16 @@ export default function RoomPage() {
     setShowSheet(true);
 
     if (latest) {
-      setDienInput(String(latest.dien ?? ""));
-      setNuocInput(String(latest.nuoc ?? ""));
+      setDienInput(
+        typeof latest.dien === "number" && Number.isFinite(latest.dien)
+          ? String(latest.dien)
+          : ""
+      );
+      setNuocInput(
+        typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
+          ? String(latest.nuoc)
+          : ""
+      );
       setNoteInput(String(latest.note ?? ""));
     } else {
       setDienInput("");
@@ -405,8 +424,16 @@ export default function RoomPage() {
     setEditing(r);
     setShowSheet(true);
 
-    setDienInput(String(r.dien ?? ""));
-    setNuocInput(String(r.nuoc ?? ""));
+    setDienInput(
+      typeof r.dien === "number" && Number.isFinite(r.dien)
+        ? String(r.dien)
+        : ""
+    );
+    setNuocInput(
+      typeof r.nuoc === "number" && Number.isFinite(r.nuoc)
+        ? String(r.nuoc)
+        : ""
+    );
     setNoteInput(String(r.note ?? ""));
   }
 
@@ -423,11 +450,11 @@ export default function RoomPage() {
   async function saveReading() {
     setMsg(null);
 
-    const dienNum = Number(dienInput);
-    const nuocNum = Number(nuocInput);
+    const dienNum = parseOptionalNumberFromInput(dienInput);
+    const nuocNum = parseOptionalNumberFromInput(nuocInput);
 
-    if (!Number.isFinite(dienNum) || !Number.isFinite(nuocNum)) {
-      setMsg("Please enter valid numbers for Điện and Nước.");
+    if (dienNum === null && nuocNum === null) {
+      setMsg("Enter at least one meter value (Điện or Nước).");
       return;
     }
 
@@ -481,6 +508,8 @@ export default function RoomPage() {
         return;
       }
 
+      // NOTE: Your current API (meter.ts) expects dien+nuoc always.
+      // Once you update meter.ts to allow optional fields, this will work perfectly.
       const res = await fetch("/api/meter", {
         method: "POST",
         headers: {
@@ -588,15 +617,12 @@ export default function RoomPage() {
   const historyRows = useMemo(() => {
     const list = Array.isArray(history) ? history : [];
     return list.map((row, idx) => {
-      const currVal = tab === "dien" ? Number(row.dien) : Number(row.nuoc);
+      const currVal = getReadingValue(row, tab);
       const nextOlder = list[idx + 1];
-      const prevVal = nextOlder
-        ? tab === "dien"
-          ? Number(nextOlder.dien)
-          : Number(nextOlder.nuoc)
-        : null;
+      const prevVal = nextOlder ? getReadingValue(nextOlder, tab) : null;
 
-      const diff = prevVal === null ? null : currVal - prevVal;
+      const diff =
+        currVal === null || prevVal === null ? null : currVal - prevVal;
 
       const diffColor =
         diff === null
@@ -613,13 +639,23 @@ export default function RoomPage() {
       return {
         key: `${row.room}-${row.id}-${row.date}-${tab}`,
         dateText: safeDate ? formatDateShort(safeDate) : String(row.date),
-        value: currVal,
+        valueText: currVal === null ? "--" : String(currVal),
         diff,
         diffColor,
         row,
       };
     });
   }, [history, tab]);
+
+  const latestDien =
+    latest && typeof latest.dien === "number" && Number.isFinite(latest.dien)
+      ? latest.dien
+      : null;
+
+  const latestNuoc =
+    latest && typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
+      ? latest.nuoc
+      : null;
 
   return (
     <main
@@ -691,7 +727,7 @@ export default function RoomPage() {
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
-              {loadingLatest ? "…" : latest ? latest.dien : "— — —"}
+              {loadingLatest ? "…" : latestDien === null ? "— — —" : latestDien}
               <span
                 style={{
                   fontSize: 16,
@@ -721,7 +757,7 @@ export default function RoomPage() {
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
-              {loadingLatest ? "…" : latest ? latest.nuoc : "— — —"}
+              {loadingLatest ? "…" : latestNuoc === null ? "— — —" : latestNuoc}
               <span
                 style={{
                   fontSize: 16,
@@ -830,7 +866,7 @@ export default function RoomPage() {
                 }}
               >
                 <div style={{ fontWeight: 800 }}>{r.dateText}</div>
-                <div style={{ fontWeight: 900 }}>{r.value}</div>
+                <div style={{ fontWeight: 900 }}>{r.valueText}</div>
                 <div style={{ fontWeight: 900, color: r.diffColor }}>
                   {diffText(r.diff)}
                 </div>
@@ -855,7 +891,7 @@ export default function RoomPage() {
               e.preventDefault();
               setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter điện"
+            placeholder="Enter điện (leave empty if none)"
           />
 
           <Field
@@ -867,7 +903,7 @@ export default function RoomPage() {
               e.preventDefault();
               setNuocInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter nước"
+            placeholder="Enter nước (leave empty if none)"
           />
 
           <div style={{ display: "grid", gap: 6 }}>

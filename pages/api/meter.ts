@@ -66,8 +66,8 @@ function buildScriptUrl(params: Record<string, string>) {
   return url.toString();
 }
 
-function isFiniteNumber(x: any) {
-  return Number.isFinite(Number(x));
+function hasFiniteNumber(x: any) {
+  return x !== null && x !== undefined && Number.isFinite(Number(x));
 }
 
 export default async function handler(
@@ -187,12 +187,19 @@ export default async function handler(
         });
       }
 
-      // For save/update, we require numbers
+      // For save/update:
+      // - allow dien OR nuoc (at least one)
+      // - allow null/undefined for the other (meaning "empty cell")
       if (action !== "delete") {
-        if (!isFiniteNumber(body.dien))
-          return res.status(400).json({ ok: false, error: "Invalid dien" });
-        if (!isFiniteNumber(body.nuoc))
-          return res.status(400).json({ ok: false, error: "Invalid nuoc" });
+        const dienProvided = hasFiniteNumber(body.dien);
+        const nuocProvided = hasFiniteNumber(body.nuoc);
+
+        if (!dienProvided && !nuocProvided) {
+          return res.status(400).json({
+            ok: false,
+            error: "Provide at least one of dien or nuoc",
+          });
+        }
       }
 
       // Audit attribution
@@ -202,10 +209,7 @@ export default async function handler(
 
       const url = buildScriptUrl({}); // token included
 
-      // Payload to Apps Script
-      // - save: {action, room, dien, nuoc, note}
-      // - update: {action, room, dien, nuoc, note, target:{id,date}}
-      // - delete: {action, room, target:{id,date}, note}
+      // Build payload
       const payload: any = {
         action,
         room: roomStr,
@@ -213,10 +217,11 @@ export default async function handler(
 
       if (action === "delete") {
         payload.target = { id: targetId, date: targetDate };
-        payload.note = attributedNote; // so you still log who deleted
+        payload.note = attributedNote; // log who deleted
       } else {
-        payload.dien = Number(body.dien);
-        payload.nuoc = Number(body.nuoc);
+        // Send null for "empty cell"
+        payload.dien = hasFiniteNumber(body.dien) ? Number(body.dien) : null;
+        payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;
         payload.note = attributedNote;
 
         if (action === "update") {

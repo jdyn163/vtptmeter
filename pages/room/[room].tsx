@@ -87,6 +87,26 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
   localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
+function writeHouseHistoryRoomListToCache(
+  house: string,
+  room: string,
+  nextList: Reading[]
+) {
+  if (!house || !room) return;
+
+  const key = historyKey(house);
+  const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
+    localStorage.getItem(key)
+  );
+
+  const data: Record<string, Reading[]> = cached?.data
+    ? { ...cached.data }
+    : {};
+
+  data[room] = Array.isArray(nextList) ? nextList.slice() : [];
+  localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+}
+
 function upsertHouseHistoryCache(
   house: string,
   reading: Reading,
@@ -158,7 +178,6 @@ function Field({
     <div style={{ display: "grid", gap: 6 }}>
       <div style={{ fontWeight: 800, marginLeft: 2 }}>{label}</div>
 
-      {/* The "real app" box */}
       <div
         style={{
           background: "#fff",
@@ -208,6 +227,9 @@ export default function RoomPage() {
   const [dienInput, setDienInput] = useState("");
   const [nuocInput, setNuocInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
+
+  const [editing, setEditing] = useState<Reading | null>(null);
+  const isEditing = !!editing;
 
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -308,10 +330,36 @@ export default function RoomPage() {
     }
   }
 
+  function closeSheet() {
+    if (saving) return;
+    setShowSheet(false);
+    setEditing(null);
+    setMsg(null);
+  }
+
+  function sortNewestFirst(list: Reading[]) {
+    const next = Array.isArray(list) ? list.slice() : [];
+    next.sort(
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+    );
+    return next;
+  }
+
+  function recomputeLatestFromHistory(nextHistory: Reading[]) {
+    const nextSorted = sortNewestFirst(nextHistory);
+    const top = nextSorted.length > 0 ? nextSorted[0] : null;
+    setLatest(top);
+
+    if (house && top) {
+      upsertHouseLatestCache(house, top);
+    }
+  }
+
   useEffect(() => {
     if (!room) return;
 
     setShowSheet(false);
+    setEditing(null);
     setDienInput("");
     setNuocInput("");
     setNoteInput("");
@@ -327,7 +375,7 @@ export default function RoomPage() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" && !saving) setShowSheet(false);
+      if (e.key === "Escape" && !saving) closeSheet();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -337,6 +385,7 @@ export default function RoomPage() {
 
   function openSheet() {
     setMsg(null);
+    setEditing(null);
     setShowSheet(true);
 
     if (latest) {
@@ -348,6 +397,17 @@ export default function RoomPage() {
       setNuocInput("");
       setNoteInput("");
     }
+  }
+
+  function openEditRow(r: Reading) {
+    if (saving) return;
+    setMsg(null);
+    setEditing(r);
+    setShowSheet(true);
+
+    setDienInput(String(r.dien ?? ""));
+    setNuocInput(String(r.nuoc ?? ""));
+    setNoteInput(String(r.note ?? ""));
   }
 
   const canTapCard = !saving && !loadingLatest && !!room && !!house;
@@ -376,20 +436,39 @@ export default function RoomPage() {
 
     const optimistic: Reading = {
       room,
-      date: new Date().toISOString(),
+      date: editing?.date ?? new Date().toISOString(),
+      id: editing?.id ?? latest?.id ?? 0,
       dien: dienNum,
       nuoc: nuocNum,
-      id: latest?.id ?? 0,
       note: noteInput.trim(),
     };
 
-    setLatest(optimistic);
-
     if (house) {
-      upsertHouseLatestCache(house, optimistic);
-      upsertHouseHistoryCache(house, optimistic, 24);
-      setHistory((prev) => upsertMonthlyHistory(prev, optimistic, 24));
+      if (isEditing && editing) {
+        setHistory((prev) => {
+          const replaced = prev.map((x) =>
+            x.id === editing.id && x.date === editing.date ? optimistic : x
+          );
+          const next = sortNewestFirst(replaced).slice(0, 24);
+          writeHouseHistoryRoomListToCache(house, room, next);
+          recomputeLatestFromHistory(next);
+          return next;
+        });
+      } else {
+        upsertHouseLatestCache(house, optimistic);
+        upsertHouseHistoryCache(house, optimistic, 24);
+        setHistory((prev) => {
+          const next = upsertMonthlyHistory(prev, optimistic, 24);
+          recomputeLatestFromHistory(next);
+          return next;
+        });
+        setLatest(optimistic);
+      }
+    } else {
+      setLatest(optimistic);
     }
+
+    setEditing(null);
 
     setToast("Saved ✅");
     window.setTimeout(() => setToast(null), 1500);
@@ -409,10 +488,15 @@ export default function RoomPage() {
           "x-vtpt-pin": pin,
         },
         body: JSON.stringify({
+          action: isEditing ? "update" : "save",
           room,
           dien: dienNum,
           nuoc: nuocNum,
           note: noteInput.trim(),
+          target:
+            isEditing && editing
+              ? { id: editing.id, date: editing.date }
+              : undefined,
         }),
       });
 
@@ -420,6 +504,7 @@ export default function RoomPage() {
       if (!json.ok) {
         setMsg(json.error || "Save failed.");
         setSaving(false);
+        await refreshLatestFromNetwork();
         return;
       }
 
@@ -428,6 +513,69 @@ export default function RoomPage() {
     } catch (err: any) {
       setMsg(String(err));
       setSaving(false);
+    }
+  }
+
+  async function deleteEditingRow() {
+    if (!editing || saving) return;
+
+    const ok = window.confirm("Delete this reading? This can't be undone.");
+    if (!ok) return;
+
+    setSaving(true);
+    closeSheet();
+
+    setHistory((prev) => {
+      const next = prev.filter(
+        (x) => !(x.id === editing.id && x.date === editing.date)
+      );
+      const sorted = sortNewestFirst(next).slice(0, 24);
+
+      if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
+      recomputeLatestFromHistory(sorted);
+
+      return sorted;
+    });
+
+    setToast("Deleted ✅");
+    window.setTimeout(() => setToast(null), 1500);
+
+    try {
+      const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
+      if (!pin) {
+        setMsg("Missing PIN. Please go back and unlock again.");
+        setSaving(false);
+        return;
+      }
+
+      const res = await fetch("/api/meter", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-vtpt-pin": pin,
+        },
+        body: JSON.stringify({
+          action: "delete",
+          room,
+          target: { id: editing.id, date: editing.date },
+        }),
+      });
+
+      const json = await res.json();
+      if (!json.ok) {
+        setMsg(json.error || "Delete failed.");
+        setSaving(false);
+        await refreshLatestFromNetwork();
+        return;
+      }
+
+      await refreshLatestFromNetwork();
+      setSaving(false);
+    } catch (err: any) {
+      setMsg(String(err));
+      setSaving(false);
+    } finally {
+      setEditing(null);
     }
   }
 
@@ -468,6 +616,7 @@ export default function RoomPage() {
         value: currVal,
         diff,
         diffColor,
+        row,
       };
     });
   }, [history, tab]);
@@ -662,12 +811,22 @@ export default function RoomPage() {
             historyRows.map((r) => (
               <div
                 key={r.key}
+                onClick={() => openEditRow(r.row)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openEditRow(r.row);
+                  }
+                }}
                 style={{
                   display: "grid",
                   gridTemplateColumns: "1.2fr 1fr 1fr",
                   padding: 12,
                   borderBottom: "1px solid #f2f2f2",
                   alignItems: "center",
+                  cursor: "pointer",
                 }}
               >
                 <div style={{ fontWeight: 800 }}>{r.dateText}</div>
@@ -682,10 +841,8 @@ export default function RoomPage() {
 
       <BottomSheet
         open={showSheet}
-        title={`${buttonLabel} reading`}
-        onClose={() => {
-          if (!saving) setShowSheet(false);
-        }}
+        title={isEditing ? "Edit history" : `${buttonLabel} reading`}
+        onClose={closeSheet}
         disabled={saving}
       >
         <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
@@ -746,22 +903,44 @@ export default function RoomPage() {
           )}
 
           <div
-            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+            }}
           >
-            <button
-              onClick={() => !saving && setShowSheet(false)}
-              disabled={saving}
-              style={{
-                padding: 12,
-                borderRadius: 12,
-                border: "1px solid #ddd",
-                background: "#fff",
-                fontWeight: 900,
-                cursor: "pointer",
-              }}
-            >
-              Cancel
-            </button>
+            {isEditing ? (
+              <button
+                onClick={deleteEditingRow}
+                disabled={saving}
+                style={{
+                  padding: 12,
+                  borderRadius: 12,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 900,
+                  cursor: saving ? "not-allowed" : "pointer",
+                  color: "#dc2626",
+                }}
+              >
+                Delete
+              </button>
+            ) : (
+              <button
+                onClick={() => !saving && closeSheet()}
+                disabled={saving}
+                style={{
+                  padding: 12,
+                  borderRadius: 12,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  fontWeight: 900,
+                  cursor: saving ? "not-allowed" : "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            )}
 
             <button
               onClick={saveReading}

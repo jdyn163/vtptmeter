@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
-const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // ✅ RESTORED (required by your Apps Script)
+const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
@@ -55,7 +55,7 @@ function buildScriptUrl(params: Record<string, string>) {
   if (!SCRIPT_TOKEN) throw new Error("Missing SCRIPT_TOKEN");
 
   const url = new URL(SCRIPT_URL);
-  url.searchParams.set("token", SCRIPT_TOKEN); // ✅ ALWAYS include token
+  url.searchParams.set("token", SCRIPT_TOKEN);
 
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && String(v).length) {
@@ -64,6 +64,10 @@ function buildScriptUrl(params: Record<string, string>) {
   }
 
   return url.toString();
+}
+
+function isFiniteNumber(x: any) {
+  return Number.isFinite(Number(x));
 }
 
 export default async function handler(
@@ -79,7 +83,7 @@ export default async function handler(
     }
 
     // =========================
-    // GET (READ): supports room + house actions
+    // GET (READ)
     // =========================
     if (req.method === "GET") {
       const action = String(req.query.action || "").trim();
@@ -117,7 +121,7 @@ export default async function handler(
     }
 
     // =========================
-    // POST (WRITE): HARD LOCK + personal PIN attribution
+    // POST (WRITE): save / update / delete
     // =========================
     if (req.method === "POST") {
       // Hard lock personal PINs
@@ -147,29 +151,78 @@ export default async function handler(
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
 
-      const { room, dien, nuoc, note } = req.body || {};
-      const roomStr = String(room || "").trim();
+      const body = req.body || {};
+      const actionRaw = String(body.action || "save").trim();
+      const action =
+        actionRaw === "update" || actionRaw === "delete" ? actionRaw : "save";
 
+      const roomStr = String(body.room || "").trim();
       if (!roomStr)
         return res.status(400).json({ ok: false, error: "Missing room" });
-      if (!Number.isFinite(Number(dien)))
-        return res.status(400).json({ ok: false, error: "Invalid dien" });
-      if (!Number.isFinite(Number(nuoc)))
-        return res.status(400).json({ ok: false, error: "Invalid nuoc" });
 
-      // low-key audit inside note
-      const noteStr = typeof note === "string" ? note.trim() : "";
-      const attributedNote = noteStr ? `[${actor}] ${noteStr}` : `[${actor}]`;
+      // For update/delete, we need a target
+      const target = body.target || undefined;
+      const targetId =
+        target && target.id !== undefined ? Number(target.id) : undefined;
+      const targetDate =
+        target && target.date !== undefined ? String(target.date).trim() : "";
+
+      if ((action === "update" || action === "delete") && !target) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "Missing target for update/delete" });
+      }
+      if ((action === "update" || action === "delete") && !targetDate) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "Missing target.date for update/delete" });
+      }
+      if (
+        (action === "update" || action === "delete") &&
+        (targetId === undefined || !Number.isFinite(targetId))
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing/invalid target.id for update/delete",
+        });
+      }
+
+      // For save/update, we require numbers
+      if (action !== "delete") {
+        if (!isFiniteNumber(body.dien))
+          return res.status(400).json({ ok: false, error: "Invalid dien" });
+        if (!isFiniteNumber(body.nuoc))
+          return res.status(400).json({ ok: false, error: "Invalid nuoc" });
+      }
+
+      // Audit attribution
+      const noteStr = typeof body.note === "string" ? body.note.trim() : "";
+      const attributedNote =
+        noteStr && noteStr.length ? `[${actor}] ${noteStr}` : `[${actor}]`;
 
       const url = buildScriptUrl({}); // token included
 
-      const payload = {
-        action: "save",
+      // Payload to Apps Script
+      // - save: {action, room, dien, nuoc, note}
+      // - update: {action, room, dien, nuoc, note, target:{id,date}}
+      // - delete: {action, room, target:{id,date}, note}
+      const payload: any = {
+        action,
         room: roomStr,
-        dien: Number(dien),
-        nuoc: Number(nuoc),
-        note: attributedNote,
       };
+
+      if (action === "delete") {
+        payload.target = { id: targetId, date: targetDate };
+        payload.note = attributedNote; // so you still log who deleted
+      } else {
+        payload.dien = Number(body.dien);
+        payload.nuoc = Number(body.nuoc);
+        payload.note = attributedNote;
+
+        if (action === "update") {
+          payload.target = { id: targetId, date: targetDate };
+        }
+      }
 
       const { status, json } = await fetchJson(url, {
         method: "POST",

@@ -236,6 +236,8 @@ export default function RoomPage() {
   const [tab, setTab] = useState<"dien" | "nuoc">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
+  const [showConfirmSheet, setShowConfirmSheet] = useState(false);
+
   const [dienInput, setDienInput] = useState("");
   const [nuocInput, setNuocInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
@@ -342,7 +344,7 @@ export default function RoomPage() {
     }
   }
 
-  function closeSheet() {
+  function closeEditSheet() {
     if (saving) return;
     setShowSheet(false);
     setEditing(null);
@@ -371,6 +373,7 @@ export default function RoomPage() {
     if (!room) return;
 
     setShowSheet(false);
+    setShowConfirmSheet(false);
     setEditing(null);
     setDienInput("");
     setNuocInput("");
@@ -386,17 +389,27 @@ export default function RoomPage() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" && !saving) closeSheet();
+      if (e.key === "Escape" && !saving) {
+        if (showConfirmSheet) {
+          // Escape on confirm = back to edit
+          setShowConfirmSheet(false);
+          setShowSheet(true);
+          setMsg(null);
+        } else {
+          closeEditSheet();
+        }
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [saving]);
+  }, [saving, showConfirmSheet]);
 
   const buttonLabel = latest ? "Edit" : "Add";
 
   function openSheet() {
     setMsg(null);
     setEditing(null);
+    setShowConfirmSheet(false);
     setShowSheet(true);
 
     if (latest) {
@@ -422,6 +435,7 @@ export default function RoomPage() {
     if (saving) return;
     setMsg(null);
     setEditing(r);
+    setShowConfirmSheet(false);
     setShowSheet(true);
 
     setDienInput(
@@ -447,7 +461,24 @@ export default function RoomPage() {
     }
   }
 
-  async function saveReading() {
+  // Step 1: Validate, then open confirm sheet (Option B)
+  function requestConfirmSave() {
+    setMsg(null);
+
+    const dienNum = parseOptionalNumberFromInput(dienInput);
+    const nuocNum = parseOptionalNumberFromInput(nuocInput);
+
+    if (dienNum === null && nuocNum === null) {
+      setMsg("Enter at least one meter value (Điện or Nước).");
+      return;
+    }
+
+    setShowSheet(false);
+    setShowConfirmSheet(true);
+  }
+
+  // Step 2: Commit save (your existing save logic, unchanged)
+  async function commitSaveReading() {
     setMsg(null);
 
     const dienNum = parseOptionalNumberFromInput(dienInput);
@@ -459,7 +490,7 @@ export default function RoomPage() {
     }
 
     setSaving(true);
-    setShowSheet(false);
+    setShowConfirmSheet(false);
 
     const optimistic: Reading = {
       room,
@@ -508,8 +539,6 @@ export default function RoomPage() {
         return;
       }
 
-      // NOTE: Your current API (meter.ts) expects dien+nuoc always.
-      // Once you update meter.ts to allow optional fields, this will work perfectly.
       const res = await fetch("/api/meter", {
         method: "POST",
         headers: {
@@ -552,7 +581,7 @@ export default function RoomPage() {
     if (!ok) return;
 
     setSaving(true);
-    closeSheet();
+    closeEditSheet();
 
     setHistory((prev) => {
       const next = prev.filter(
@@ -656,6 +685,10 @@ export default function RoomPage() {
     latest && typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
       ? latest.nuoc
       : null;
+
+  // Confirm sheet shows only the entered numbers (big)
+  const confirmDien = parseOptionalNumberFromInput(dienInput);
+  const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
 
   return (
     <main
@@ -875,10 +908,11 @@ export default function RoomPage() {
         </div>
       </div>
 
+      {/* Edit Sheet (Step 1) */}
       <BottomSheet
         open={showSheet}
         title={isEditing ? "Edit history" : `${buttonLabel} reading`}
-        onClose={closeSheet}
+        onClose={closeEditSheet}
         disabled={saving}
       >
         <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
@@ -891,7 +925,7 @@ export default function RoomPage() {
               e.preventDefault();
               setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter điện (leave empty if none)"
+            placeholder="Enter điện"
           />
 
           <Field
@@ -903,7 +937,7 @@ export default function RoomPage() {
               e.preventDefault();
               setNuocInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter nước (leave empty if none)"
+            placeholder="Enter nước"
           />
 
           <div style={{ display: "grid", gap: 6 }}>
@@ -963,7 +997,7 @@ export default function RoomPage() {
               </button>
             ) : (
               <button
-                onClick={() => !saving && closeSheet()}
+                onClick={() => !saving && closeEditSheet()}
                 disabled={saving}
                 style={{
                   padding: 12,
@@ -979,7 +1013,7 @@ export default function RoomPage() {
             )}
 
             <button
-              onClick={saveReading}
+              onClick={requestConfirmSave}
               disabled={saving}
               style={{
                 padding: 12,
@@ -991,7 +1025,120 @@ export default function RoomPage() {
                 cursor: saving ? "not-allowed" : "pointer",
               }}
             >
-              {saving ? "Saving..." : "Save"}
+              Save
+            </button>
+          </div>
+
+          <div style={{ height: 6 }} />
+        </div>
+      </BottomSheet>
+
+      {/* Confirm Sheet (Step 2) - numbers only */}
+      <BottomSheet
+        open={showConfirmSheet}
+        title="Confirm"
+        onClose={() => {
+          if (saving) return;
+          setShowConfirmSheet(false);
+          setShowSheet(true);
+          setMsg(null);
+        }}
+        disabled={saving}
+      >
+        <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
+          <div
+            style={{
+              background: "#fff",
+              border: "1px solid #e5e5e5",
+              borderRadius: 14,
+              padding: 14,
+            }}
+          >
+            <div style={{ fontWeight: 900, opacity: 0.7 }}>Electric Meter</div>
+            <div
+              style={{
+                marginTop: 8,
+                display: "flex",
+                alignItems: "baseline",
+                gap: 10,
+              }}
+            >
+              <div style={{ fontSize: 44, fontWeight: 950 }}>
+                {confirmDien === null ? "— — —" : confirmDien}
+              </div>
+              <div style={{ fontWeight: 800, opacity: 0.45 }}>kWh</div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: "#fff",
+              border: "1px solid #e5e5e5",
+              borderRadius: 14,
+              padding: 14,
+            }}
+          >
+            <div style={{ fontWeight: 900, opacity: 0.7 }}>Water Meter</div>
+            <div
+              style={{
+                marginTop: 8,
+                display: "flex",
+                alignItems: "baseline",
+                gap: 10,
+              }}
+            >
+              <div style={{ fontSize: 44, fontWeight: 950 }}>
+                {confirmNuoc === null ? "— — —" : confirmNuoc}
+              </div>
+              <div style={{ fontWeight: 800, opacity: 0.45 }}>m³</div>
+            </div>
+          </div>
+
+          {msg && (
+            <div style={{ color: "#b00020", fontWeight: 800 }}>{msg}</div>
+          )}
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 10,
+            }}
+          >
+            <button
+              onClick={() => {
+                if (saving) return;
+                setShowConfirmSheet(false);
+                setShowSheet(true);
+                setMsg(null);
+              }}
+              disabled={saving}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 900,
+                cursor: saving ? "not-allowed" : "pointer",
+              }}
+            >
+              Back
+            </button>
+
+            <button
+              onClick={commitSaveReading}
+              disabled={saving}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid #111",
+                background: saving ? "#ddd" : "#111",
+                color: saving ? "#333" : "#fff",
+                fontWeight: 900,
+                cursor: saving ? "not-allowed" : "pointer",
+              }}
+            >
+              {saving ? "Saving..." : "Confirm & Save"}
             </button>
           </div>
 

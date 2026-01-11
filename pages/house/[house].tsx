@@ -6,8 +6,8 @@ import { getRoomsByHouse, RoomsByHouse } from "../../lib/rooms";
 type Reading = {
   room: string;
   date: string;
-  dien: number;
-  nuoc: number;
+  dien: number | null;
+  nuoc: number | null;
   id: number;
   note?: string;
 };
@@ -36,6 +36,10 @@ function timeText(ms?: number) {
   return new Date(ms).toLocaleTimeString();
 }
 
+function displayMeter(v: number | null | undefined) {
+  return v === null || v === undefined ? "---" : String(v);
+}
+
 export default function HousePage() {
   const router = useRouter();
   const house = (router.query.house as string) || "";
@@ -44,7 +48,7 @@ export default function HousePage() {
   const [latestMap, setLatestMap] = useState<Record<string, Reading>>({});
   const [loading, setLoading] = useState(true);
 
-  // NEW: house history cache (room -> readings[])
+  // house history cache (room -> readings[])
   const [houseHistory, setHouseHistory] = useState<Record<string, Reading[]>>(
     {}
   );
@@ -201,7 +205,7 @@ export default function HousePage() {
                   Điện
                 </div>
                 <div style={{ fontWeight: 900 }}>
-                  {latest ? latest.dien : "—"}
+                  {latest ? displayMeter(latest.dien) : "---"}
                 </div>
               </div>
 
@@ -210,7 +214,7 @@ export default function HousePage() {
                   Nước
                 </div>
                 <div style={{ fontWeight: 900 }}>
-                  {latest ? latest.nuoc : "—"}
+                  {latest ? displayMeter(latest.nuoc) : "---"}
                 </div>
               </div>
             </Link>
@@ -218,7 +222,6 @@ export default function HousePage() {
         })}
       </div>
 
-      {/* (Optional) debug: shows how many rooms have cached history */}
       <div style={{ marginTop: 14, fontSize: 12, opacity: 0.5 }}>
         History cached rooms: {Object.keys(houseHistory || {}).length}
       </div>

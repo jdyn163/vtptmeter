@@ -1176,10 +1176,6 @@ export default function RoomPage() {
         disabled={saving}
       >
         <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
-          <div style={{ fontWeight: 900, opacity: 0.7 }}>
-            Check the numbers carefully, then confirm.
-          </div>
-
           <div
             style={{
               background: "#fff",

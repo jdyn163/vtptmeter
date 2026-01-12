@@ -99,7 +99,7 @@ export default async function handler(
       }
 
       const houseActions = new Set(["houseLatest", "houseHistory"]);
-      const roomActions = new Set(["latest", "history"]);
+      const roomActions = new Set(["latest", "history", "log"]);
 
       if (houseActions.has(action) && !house) {
         return res.status(400).json({ ok: false, error: "Missing house" });
@@ -124,7 +124,6 @@ export default async function handler(
     // POST (WRITE): save / update / delete
     // =========================
     if (req.method === "POST") {
-      // Hard lock personal PINs
       if (!VTPT_PINS) {
         return res.status(500).json({
           ok: false,
@@ -160,7 +159,6 @@ export default async function handler(
       if (!roomStr)
         return res.status(400).json({ ok: false, error: "Missing room" });
 
-      // For update/delete, we need a target
       const target = body.target || undefined;
       const targetId =
         target && target.id !== undefined ? Number(target.id) : undefined;
@@ -187,9 +185,6 @@ export default async function handler(
         });
       }
 
-      // For save/update:
-      // - allow dien OR nuoc (at least one)
-      // - allow null/undefined for the other (meaning "empty cell")
       if (action !== "delete") {
         const dienProvided = hasFiniteNumber(body.dien);
         const nuocProvided = hasFiniteNumber(body.nuoc);
@@ -202,27 +197,22 @@ export default async function handler(
         }
       }
 
-      // Audit attribution
       const noteStr = typeof body.note === "string" ? body.note.trim() : "";
-      const attributedNote =
-        noteStr && noteStr.length ? `[${actor}] ${noteStr}` : `[${actor}]`;
 
-      const url = buildScriptUrl({}); // token included
+      const url = buildScriptUrl({});
 
-      // Build payload
       const payload: any = {
         action,
         room: roomStr,
+        actor,
       };
 
       if (action === "delete") {
         payload.target = { id: targetId, date: targetDate };
-        payload.note = attributedNote; // log who deleted
       } else {
-        // Send null for "empty cell"
         payload.dien = hasFiniteNumber(body.dien) ? Number(body.dien) : null;
         payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;
-        payload.note = attributedNote;
+        payload.note = noteStr;
 
         if (action === "update") {
           payload.target = { id: targetId, date: targetDate };

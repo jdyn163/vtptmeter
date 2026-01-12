@@ -233,7 +233,8 @@ export default function RoomPage() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
-  const [tab, setTab] = useState<"dien" | "nuoc">("dien");
+  // NEW: third tab in History section
+  const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
   const [showConfirmSheet, setShowConfirmSheet] = useState(false);
@@ -248,6 +249,11 @@ export default function RoomPage() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+
+  // NEW: log state
+  const [loadingLog, setLoadingLog] = useState(false);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logErr, setLogErr] = useState<string | null>(null);
 
   const TTL_MS = 2 * 60 * 1000;
 
@@ -344,6 +350,29 @@ export default function RoomPage() {
     }
   }
 
+  async function refreshLogFromNetwork() {
+    if (!room) return;
+    setLoadingLog(true);
+    setLogErr(null);
+    try {
+      const r = await fetch(
+        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`
+      );
+      const j = await r.json();
+      if (!j?.ok) {
+        setLogErr(j?.error || "Failed to load log.");
+        setLogLines([]);
+      } else {
+        setLogLines(Array.isArray(j.data) ? j.data : []);
+      }
+    } catch (e: any) {
+      setLogErr(String(e?.message || e));
+      setLogLines([]);
+    } finally {
+      setLoadingLog(false);
+    }
+  }
+
   function closeEditSheet() {
     if (saving) return;
     setShowSheet(false);
@@ -381,17 +410,24 @@ export default function RoomPage() {
     setMsg(null);
     setToast(null);
     setTab("dien");
+    setLogLines([]);
+    setLogErr(null);
 
     loadFromCaches();
     backgroundRefreshIfStale();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
+  // When switching to Log tab, fetch it
+  useEffect(() => {
+    if (tab === "log") refreshLogFromNetwork();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, room]);
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape" && !saving) {
         if (showConfirmSheet) {
-          // Escape on confirm = back to edit
           setShowConfirmSheet(false);
           setShowSheet(true);
           setMsg(null);
@@ -461,7 +497,6 @@ export default function RoomPage() {
     }
   }
 
-  // Step 1: Validate, then open confirm sheet (Option B)
   function requestConfirmSave() {
     setMsg(null);
 
@@ -477,7 +512,6 @@ export default function RoomPage() {
     setShowConfirmSheet(true);
   }
 
-  // Step 2: Commit save (your existing save logic, unchanged)
   async function commitSaveReading() {
     setMsg(null);
 
@@ -567,6 +601,9 @@ export default function RoomPage() {
       }
 
       await refreshLatestFromNetwork();
+      // If user is on Log tab, refresh it too
+      if (tab === "log") await refreshLogFromNetwork();
+
       setSaving(false);
     } catch (err: any) {
       setMsg(String(err));
@@ -628,6 +665,8 @@ export default function RoomPage() {
       }
 
       await refreshLatestFromNetwork();
+      if (tab === "log") await refreshLogFromNetwork();
+
       setSaving(false);
     } catch (err: any) {
       setMsg(String(err));
@@ -646,12 +685,15 @@ export default function RoomPage() {
   const historyRows = useMemo(() => {
     const list = Array.isArray(history) ? history : [];
     return list.map((row, idx) => {
-      const currVal = getReadingValue(row, tab);
+      const currVal = getReadingValue(row, tab === "log" ? "dien" : tab);
       const nextOlder = list[idx + 1];
-      const prevVal = nextOlder ? getReadingValue(nextOlder, tab) : null;
+      const prevVal =
+        nextOlder && tab !== "log" ? getReadingValue(nextOlder, tab) : null;
 
       const diff =
-        currVal === null || prevVal === null ? null : currVal - prevVal;
+        tab === "log" || currVal === null || prevVal === null
+          ? null
+          : currVal - prevVal;
 
       const diffColor =
         diff === null
@@ -686,7 +728,6 @@ export default function RoomPage() {
       ? latest.nuoc
       : null;
 
-  // Confirm sheet shows only the entered numbers (big)
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
 
@@ -842,70 +883,159 @@ export default function RoomPage() {
           >
             Water
           </button>
-        </div>
-
-        <div
-          style={{
-            marginTop: 12,
-            background: "#fff",
-            border: "1px solid #e5e5e5",
-            borderRadius: 14,
-            overflow: "hidden",
-          }}
-        >
-          <div
+          <button
+            onClick={() => setTab("log")}
             style={{
-              display: "grid",
-              gridTemplateColumns: "1.2fr 1fr 1fr",
-              padding: 12,
+              flex: 1,
+              padding: 10,
+              borderRadius: 999,
+              border: "1px solid #ddd",
+              background: tab === "log" ? "#111" : "#fff",
+              color: tab === "log" ? "#fff" : "#111",
               fontWeight: 900,
-              opacity: 0.7,
-              borderBottom: "1px solid #eee",
+              cursor: "pointer",
             }}
           >
-            <div>Date</div>
-            <div>Value</div>
-            <div>Difference</div>
-          </div>
+            Log
+          </button>
+        </div>
 
-          {loadingHistory && (
-            <div style={{ padding: 12, opacity: 0.7 }}>Loading…</div>
-          )}
-
-          {!loadingHistory && historyRows.length === 0 && (
-            <div style={{ padding: 12, opacity: 0.7 }}>No history yet.</div>
-          )}
-
-          {!loadingHistory &&
-            historyRows.map((r) => (
-              <div
-                key={r.key}
-                onClick={() => openEditRow(r.row)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    openEditRow(r.row);
-                  }
-                }}
+        {tab === "log" ? (
+          <div
+            style={{
+              marginTop: 12,
+              background: "#fff",
+              border: "1px solid #e5e5e5",
+              borderRadius: 14,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: 12,
+                fontWeight: 900,
+                opacity: 0.7,
+                borderBottom: "1px solid #eee",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+              }}
+            >
+              <div>Room Log</div>
+              <button
+                onClick={refreshLogFromNetwork}
+                disabled={loadingLog}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.2fr 1fr 1fr",
-                  padding: 12,
-                  borderBottom: "1px solid #f2f2f2",
-                  alignItems: "center",
-                  cursor: "pointer",
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: loadingLog ? "not-allowed" : "pointer",
+                  fontWeight: 900,
                 }}
               >
-                <div style={{ fontWeight: 800 }}>{r.dateText}</div>
-                <div style={{ fontWeight: 900 }}>{r.valueText}</div>
-                <div style={{ fontWeight: 900, color: r.diffColor }}>
-                  {diffText(r.diff)}
-                </div>
+                {loadingLog ? "Loading…" : "Refresh"}
+              </button>
+            </div>
+
+            {logErr && (
+              <div style={{ padding: 12, color: "#b00020", fontWeight: 800 }}>
+                {logErr}
               </div>
-            ))}
-        </div>
+            )}
+
+            {!logErr && loadingLog && (
+              <div style={{ padding: 12, opacity: 0.7 }}>Loading…</div>
+            )}
+
+            {!logErr && !loadingLog && logLines.length === 0 && (
+              <div style={{ padding: 12, opacity: 0.7 }}>No log yet.</div>
+            )}
+
+            {!logErr &&
+              !loadingLog &&
+              logLines.map((line, idx) => (
+                <div
+                  key={`${idx}-${line}`}
+                  style={{
+                    padding: 12,
+                    borderBottom: "1px solid #f2f2f2",
+                    fontFamily:
+                      "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    lineHeight: 1.35,
+                  }}
+                >
+                  {line}
+                </div>
+              ))}
+          </div>
+        ) : (
+          <div
+            style={{
+              marginTop: 12,
+              background: "#fff",
+              border: "1px solid #e5e5e5",
+              borderRadius: 14,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1.2fr 1fr 1fr",
+                padding: 12,
+                fontWeight: 900,
+                opacity: 0.7,
+                borderBottom: "1px solid #eee",
+              }}
+            >
+              <div>Date</div>
+              <div>Value</div>
+              <div>Difference</div>
+            </div>
+
+            {loadingHistory && (
+              <div style={{ padding: 12, opacity: 0.7 }}>Loading…</div>
+            )}
+
+            {!loadingHistory && historyRows.length === 0 && (
+              <div style={{ padding: 12, opacity: 0.7 }}>No history yet.</div>
+            )}
+
+            {!loadingHistory &&
+              historyRows.map((r) => (
+                <div
+                  key={r.key}
+                  onClick={() => openEditRow(r.row)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openEditRow(r.row);
+                    }
+                  }}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1.2fr 1fr 1fr",
+                    padding: 12,
+                    borderBottom: "1px solid #f2f2f2",
+                    alignItems: "center",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontWeight: 800 }}>{r.dateText}</div>
+                  <div style={{ fontWeight: 900 }}>{r.valueText}</div>
+                  <div style={{ fontWeight: 900, color: r.diffColor }}>
+                    {diffText(r.diff)}
+                  </div>
+                </div>
+              ))}
+          </div>
+        )}
       </div>
 
       {/* Edit Sheet (Step 1) */}
@@ -955,7 +1085,7 @@ export default function RoomPage() {
               <input
                 value={noteInput}
                 onChange={(e) => setNoteInput(e.target.value)}
-                placeholder="Optional note"
+                placeholder="ie. thay đồng hồ điện"
                 style={{
                   width: "100%",
                   padding: 12,
@@ -1046,6 +1176,10 @@ export default function RoomPage() {
         disabled={saving}
       >
         <div style={{ marginTop: 12, display: "grid", gap: 14 }}>
+          <div style={{ fontWeight: 900, opacity: 0.7 }}>
+            Check the numbers carefully, then confirm.
+          </div>
+
           <div
             style={{
               background: "#fff",

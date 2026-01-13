@@ -40,6 +40,21 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
+/* ===== ✅ monthly check helpers ===== */
+
+function monthKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isLoggedThisMonth(reading?: Reading) {
+  if (!reading?.date) return false;
+  const parsed = new Date(reading.date);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return monthKey(parsed) === monthKey(new Date());
+}
+
+/* =================================== */
+
 export default function HousePage() {
   const router = useRouter();
   const house = (router.query.house as string) || "";
@@ -48,7 +63,6 @@ export default function HousePage() {
   const [latestMap, setLatestMap] = useState<Record<string, Reading>>({});
   const [loading, setLoading] = useState(true);
 
-  // house history cache (room -> readings[])
   const [houseHistory, setHouseHistory] = useState<Record<string, Reading[]>>(
     {}
   );
@@ -58,12 +72,12 @@ export default function HousePage() {
   useEffect(() => {
     if (!house) return;
 
-    // 1) build rooms list from lib
+    // 1) build rooms list
     const all: RoomsByHouse = getRoomsByHouse();
     const list = all[house] || [];
     setRooms(list);
 
-    // 2) load cached latest immediately (instant UI)
+    // 2) load cached latest
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
       localStorage.getItem(latestKey(house))
     );
@@ -74,7 +88,7 @@ export default function HousePage() {
       setLatestMap(m);
     }
 
-    // 2b) load cached houseHistory immediately
+    // 2b) load cached history
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
       localStorage.getItem(historyKey(house))
     );
@@ -96,11 +110,10 @@ export default function HousePage() {
       setStatus("No cache yet");
     }
 
-    // 3) fetch fresh in background (latest + history)
+    // 3) fetch fresh in background
     (async () => {
       setLoading(true);
       try {
-        // --- fetch latest ---
         const r1 = await fetch(
           `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
         );
@@ -116,7 +129,6 @@ export default function HousePage() {
           JSON.stringify({ savedAt: Date.now(), data: arr })
         );
 
-        // --- fetch history (per room) ---
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
             house
@@ -134,7 +146,7 @@ export default function HousePage() {
         );
 
         setStatus(`Updated (${new Date().toLocaleTimeString()})`);
-      } catch (e: any) {
+      } catch {
         setStatus(`Fetch failed (using cache)`);
       } finally {
         setLoading(false);
@@ -198,7 +210,10 @@ export default function HousePage() {
                 alignItems: "center",
               }}
             >
-              <div style={{ fontWeight: 900 }}>{room}</div>
+              <div style={{ fontWeight: 900 }}>
+                {isLoggedThisMonth(latest) ? "✅ " : ""}
+                {room}
+              </div>
 
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 12, opacity: 0.55, fontWeight: 800 }}>

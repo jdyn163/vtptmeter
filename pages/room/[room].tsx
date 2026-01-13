@@ -1,8 +1,7 @@
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import BottomSheet from "../../components/BottomSheet";
-import { getRoomsByHouse } from "../../lib/rooms";
 
 type Reading = {
   room: string;
@@ -234,6 +233,7 @@ export default function RoomPage() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
+  // NEW: third tab in History section
   const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
@@ -250,126 +250,12 @@ export default function RoomPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // NEW: log state
   const [loadingLog, setLoadingLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
   const TTL_MS = 2 * 60 * 1000;
-
-  // -------------------- Swipe handling --------------------
-  const swipeRef = useRef<{
-    active: boolean;
-    startX: number;
-    startY: number;
-    lastX: number;
-    lastY: number;
-  }>({
-    active: false,
-    startX: 0,
-    startY: 0,
-    lastX: 0,
-    lastY: 0,
-  });
-
-  function canUseSwipe() {
-    if (saving) return false;
-    if (showSheet || showConfirmSheet) return false;
-    if (!room || !house) return false;
-    return true;
-  }
-
-  function goBackSmart() {
-    if (saving) return;
-
-    if (showConfirmSheet) {
-      setShowConfirmSheet(false);
-      setShowSheet(true);
-      setMsg(null);
-      return;
-    }
-    if (showSheet) {
-      closeEditSheet();
-      return;
-    }
-
-    router.push(`/house/${encodeURIComponent(house)}`);
-  }
-
-  function goNextRoom() {
-    if (!canUseSwipe()) return;
-
-    const roomsByHouse = getRoomsByHouse();
-    const list = roomsByHouse?.[house];
-    if (!Array.isArray(list) || list.length === 0) return;
-
-    const idx = list.indexOf(room);
-    if (idx < 0) return;
-
-    const next = list[idx + 1];
-    if (!next) {
-      setToast("Last room");
-      window.setTimeout(() => setToast(null), 900);
-      return;
-    }
-
-    router.push({
-      pathname: `/room/${encodeURIComponent(next)}`,
-      query: { house },
-    });
-  }
-
-  function isInteractiveTarget(el: EventTarget | null) {
-    const node = el as HTMLElement | null;
-    if (!node) return false;
-    const tag = (node.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return true;
-    if (node.isContentEditable) return true;
-    return false;
-  }
-
-  function onTouchStart(e: React.TouchEvent) {
-    if (!canUseSwipe()) return;
-    if (isInteractiveTarget(e.target)) return;
-
-    const t = e.touches?.[0];
-    if (!t) return;
-
-    swipeRef.current.active = true;
-    swipeRef.current.startX = t.clientX;
-    swipeRef.current.startY = t.clientY;
-    swipeRef.current.lastX = t.clientX;
-    swipeRef.current.lastY = t.clientY;
-  }
-
-  function onTouchMove(e: React.TouchEvent) {
-    if (!swipeRef.current.active) return;
-    const t = e.touches?.[0];
-    if (!t) return;
-    swipeRef.current.lastX = t.clientX;
-    swipeRef.current.lastY = t.clientY;
-  }
-
-  function onTouchEnd() {
-    if (!swipeRef.current.active) return;
-    swipeRef.current.active = false;
-
-    if (!canUseSwipe()) return;
-
-    const dx = swipeRef.current.lastX - swipeRef.current.startX;
-    const dy = swipeRef.current.lastY - swipeRef.current.startY;
-    const adx = Math.abs(dx);
-    const ady = Math.abs(dy);
-
-    // Avoid accidental triggers while scrolling
-    if (adx < 60) return;
-    if (ady > 30) return;
-    if (adx < ady * 1.5) return;
-
-    // Right swipe => back, Left swipe => next room
-    if (dx > 0) goBackSmart();
-    else goNextRoom();
-  }
-  // ---------------------------------------------------------
 
   function loadFromCaches() {
     if (!room || !house) return;
@@ -529,23 +415,10 @@ export default function RoomPage() {
 
     loadFromCaches();
     backgroundRefreshIfStale();
-
-    // one-time swipe hint per session
-    try {
-      const key = "vtpt_swipe_hint_shown";
-      const shown = sessionStorage.getItem(key);
-      if (!shown) {
-        sessionStorage.setItem(key, "1");
-        setToast("Swipe ← next room · Swipe → back");
-        window.setTimeout(() => setToast(null), 1800);
-      }
-    } catch {
-      // ignore
-    }
-
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
+  // When switching to Log tab, fetch it
   useEffect(() => {
     if (tab === "log") refreshLogFromNetwork();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -565,7 +438,7 @@ export default function RoomPage() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [saving, showConfirmSheet, showSheet]);
+  }, [saving, showConfirmSheet]);
 
   const buttonLabel = latest ? "Edit" : "Add";
 
@@ -728,6 +601,7 @@ export default function RoomPage() {
       }
 
       await refreshLatestFromNetwork();
+      // If user is on Log tab, refresh it too
       if (tab === "log") await refreshLogFromNetwork();
 
       setSaving(false);
@@ -859,15 +733,11 @@ export default function RoomPage() {
 
   return (
     <main
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
       style={{
         padding: 16,
         maxWidth: 520,
         margin: "0 auto",
         fontFamily: "system-ui, sans-serif",
-        touchAction: "pan-y",
       }}
     >
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
@@ -902,10 +772,6 @@ export default function RoomPage() {
               background: "#fff",
               fontWeight: 800,
               fontSize: 12,
-              maxWidth: 220,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
             }}
           >
             {toast}
@@ -1297,7 +1163,7 @@ export default function RoomPage() {
         </div>
       </BottomSheet>
 
-      {/* Confirm Sheet (Step 2) */}
+      {/* Confirm Sheet (Step 2) - numbers only */}
       <BottomSheet
         open={showConfirmSheet}
         title="Confirm"

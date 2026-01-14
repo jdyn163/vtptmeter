@@ -53,12 +53,20 @@ function isLoggedThisMonth(reading?: Reading) {
   return monthKey(parsed) === monthKey(new Date());
 }
 
-// note exists AND is not marked resolved
+function isResolvedNote(note?: string) {
+  if (!note) return false;
+  return /\bresolved\b/i.test(note);
+}
+
+function hasAnyNote(reading?: Reading) {
+  const note = reading?.note?.trim();
+  return !!note;
+}
+
 function hasUnresolvedNote(reading?: Reading) {
   const note = reading?.note?.trim();
   if (!note) return false;
-  // "resolved" anywhere (case-insensitive) -> treat as resolved
-  return !/\bresolved\b/i.test(note);
+  return !isResolvedNote(note);
 }
 
 /* =================================== */
@@ -203,9 +211,33 @@ export default function HousePage() {
         {rooms.map((room) => {
           const latest = latestMap[room];
           const loggedThisMonth = isLoggedThisMonth(latest);
-          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
 
-          // ✅ IMPORTANT: If not logged this month, show empty meters on house list
+          // Your new rules:
+          // - no log -> no icon
+          // - logged -> check
+          // - have note -> warning
+          // - logged + note -> warning (no check)
+          // - note contains "resolved" -> check
+          const showAnyIcon = loggedThisMonth;
+          const noteExistsThisMonth = loggedThisMonth && hasAnyNote(latest);
+          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
+          const resolvedNote =
+            loggedThisMonth && noteExistsThisMonth && !unresolvedNote;
+
+          // Pick ONE icon only (per your rules)
+          const iconSrc = !showAnyIcon
+            ? null
+            : unresolvedNote
+            ? "/icons/warning.png"
+            : "/icons/check.png";
+
+          const iconAlt = !showAnyIcon
+            ? ""
+            : unresolvedNote
+            ? "Has note"
+            : "Logged";
+
+          // If not logged this month, show empty meters on house list
           const dienDisplay = loggedThisMonth
             ? displayMeter(latest?.dien)
             : "---";
@@ -233,31 +265,17 @@ export default function HousePage() {
               }}
             >
               <div style={{ fontWeight: 900 }}>
-                {loggedThisMonth ? (
-                  <>
-                    <img
-                      src="/icons/check.png"
-                      alt="Logged"
-                      style={{
-                        width: 22,
-                        height: 22,
-                        marginRight: 6,
-                        verticalAlign: "middle",
-                      }}
-                    />
-                    {unresolvedNote ? (
-                      <img
-                        src="/icons/warning.png"
-                        alt="Has note"
-                        style={{
-                          width: 22,
-                          height: 22,
-                          marginRight: 6,
-                          verticalAlign: "middle",
-                        }}
-                      />
-                    ) : null}
-                  </>
+                {iconSrc ? (
+                  <img
+                    src={iconSrc}
+                    alt={iconAlt}
+                    style={{
+                      width: 22,
+                      height: 22,
+                      marginRight: 6,
+                      verticalAlign: "middle",
+                    }}
+                  />
                 ) : null}
                 {room}
               </div>

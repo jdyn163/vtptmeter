@@ -40,7 +40,7 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
-/* ===== ✅ monthly check helpers ===== */
+/* ===== monthly status helpers ===== */
 
 function monthKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -51,6 +51,14 @@ function isLoggedThisMonth(reading?: Reading) {
   const parsed = new Date(reading.date);
   if (Number.isNaN(parsed.getTime())) return false;
   return monthKey(parsed) === monthKey(new Date());
+}
+
+// note exists AND is not marked resolved
+function hasUnresolvedNote(reading?: Reading) {
+  const note = reading?.note?.trim();
+  if (!note) return false;
+  // "resolved" anywhere (case-insensitive) -> treat as resolved
+  return !/\bresolved\b/i.test(note);
 }
 
 /* =================================== */
@@ -86,6 +94,8 @@ export default function HousePage() {
       const m: Record<string, Reading> = {};
       cachedLatest.data.forEach((r) => (m[r.room] = r));
       setLatestMap(m);
+    } else {
+      setLatestMap({});
     }
 
     // 2b) load cached history
@@ -95,6 +105,8 @@ export default function HousePage() {
 
     if (cachedHist?.data) {
       setHouseHistory(cachedHist.data || {});
+    } else {
+      setHouseHistory({});
     }
 
     const latestStamp = cachedLatest?.savedAt;
@@ -190,6 +202,16 @@ export default function HousePage() {
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
+          const loggedThisMonth = isLoggedThisMonth(latest);
+          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
+
+          // ✅ IMPORTANT: If not logged this month, show empty meters on house list
+          const dienDisplay = loggedThisMonth
+            ? displayMeter(latest?.dien)
+            : "---";
+          const nuocDisplay = loggedThisMonth
+            ? displayMeter(latest?.nuoc)
+            : "---";
 
           return (
             <Link
@@ -211,7 +233,32 @@ export default function HousePage() {
               }}
             >
               <div style={{ fontWeight: 900 }}>
-                {isLoggedThisMonth(latest) ? "✅ " : ""}
+                {loggedThisMonth ? (
+                  <>
+                    <img
+                      src="/icons/check.png"
+                      alt="Logged"
+                      style={{
+                        width: 22,
+                        height: 22,
+                        marginRight: 6,
+                        verticalAlign: "middle",
+                      }}
+                    />
+                    {unresolvedNote ? (
+                      <img
+                        src="/icons/warning.png"
+                        alt="Has note"
+                        style={{
+                          width: 22,
+                          height: 22,
+                          marginRight: 6,
+                          verticalAlign: "middle",
+                        }}
+                      />
+                    ) : null}
+                  </>
+                ) : null}
                 {room}
               </div>
 
@@ -219,18 +266,14 @@ export default function HousePage() {
                 <div style={{ fontSize: 12, opacity: 0.55, fontWeight: 800 }}>
                   Điện
                 </div>
-                <div style={{ fontWeight: 900 }}>
-                  {latest ? displayMeter(latest.dien) : "---"}
-                </div>
+                <div style={{ fontWeight: 900 }}>{dienDisplay}</div>
               </div>
 
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 12, opacity: 0.55, fontWeight: 800 }}>
                   Nước
                 </div>
-                <div style={{ fontWeight: 900 }}>
-                  {latest ? displayMeter(latest.nuoc) : "---"}
-                </div>
+                <div style={{ fontWeight: 900 }}>{nuocDisplay}</div>
               </div>
             </Link>
           );

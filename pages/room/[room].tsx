@@ -50,6 +50,16 @@ function monthKeyFromDateString(dateStr: string) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function currentMonthKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isThisMonth(dateStr?: string) {
+  if (!dateStr) return false;
+  return monthKeyFromDateString(dateStr) === currentMonthKey();
+}
+
 function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
   const mk = monthKeyFromDateString(incoming.date);
 
@@ -102,8 +112,8 @@ function writeHouseHistoryRoomListToCache(
   const data: Record<string, Reading[]> = cached?.data
     ? { ...cached.data }
     : {};
-
   data[room] = Array.isArray(nextList) ? nextList.slice() : [];
+
   localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
@@ -440,7 +450,8 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  const buttonLabel = latest ? "Edit" : "Add";
+  const hasThisMonth = !!(latest && isThisMonth(latest.date));
+  const buttonLabel = hasThisMonth ? "Edit" : "Add";
 
   function openSheet() {
     setMsg(null);
@@ -448,7 +459,8 @@ export default function RoomPage() {
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    if (latest) {
+    // ✅ IMPORTANT: New month should be EMPTY (do NOT carry last month's numbers)
+    if (latest && isThisMonth(latest.date)) {
       setDienInput(
         typeof latest.dien === "number" && Number.isFinite(latest.dien)
           ? String(latest.dien)
@@ -718,13 +730,22 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
+  // ✅ show "This month reading" as empty unless latest is in THIS month
+  const showThisMonthNumbers = hasThisMonth;
+
   const latestDien =
-    latest && typeof latest.dien === "number" && Number.isFinite(latest.dien)
+    showThisMonthNumbers &&
+    latest &&
+    typeof latest.dien === "number" &&
+    Number.isFinite(latest.dien)
       ? latest.dien
       : null;
 
   const latestNuoc =
-    latest && typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
+    showThisMonthNumbers &&
+    latest &&
+    typeof latest.nuoc === "number" &&
+    Number.isFinite(latest.nuoc)
       ? latest.nuoc
       : null;
 

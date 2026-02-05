@@ -15,6 +15,16 @@ function getHeaderPin(req: NextApiRequest): string {
   return (pin || "").trim();
 }
 
+// allow pin from body too (for approve sheet)
+function getAnyPin(req: NextApiRequest): string {
+  const headerPin = getHeaderPin(req);
+  if (headerPin) return headerPin;
+
+  const bodyPin =
+    req.body && typeof req.body.pin === "string" ? req.body.pin.trim() : "";
+  return bodyPin;
+}
+
 function parsePins(pinsRaw: string): Record<string, string> {
   const map: Record<string, string> = {};
   const items = pinsRaw
@@ -70,9 +80,49 @@ function hasFiniteNumber(x: any) {
   return x !== null && x !== undefined && Number.isFinite(Number(x));
 }
 
+// ===== cycle helpers =====
+function monthKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isMonthKey(s: string) {
+  return /^\d{4}-\d{2}$/.test((s || "").trim());
+}
+
+function nextMonthKeyFrom(key: string) {
+  const m = /^(\d{4})-(\d{2})$/.exec((key || "").trim());
+  if (!m) return monthKey(new Date());
+
+  const y = Number(m[1]);
+  const mo = Number(m[2]); // 1..12
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || mo < 1 || mo > 12) {
+    return monthKey(new Date());
+  }
+
+  const d = new Date(y, mo - 1, 1);
+  d.setMonth(d.getMonth() + 1);
+  return monthKey(d);
+}
+
+function prevMonthKeyFrom(key: string) {
+  const m = /^(\d{4})-(\d{2})$/.exec((key || "").trim());
+  if (!m) return monthKey(new Date());
+
+  const y = Number(m[1]);
+  const mo = Number(m[2]); // 1..12
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || mo < 1 || mo > 12) {
+    return monthKey(new Date());
+  }
+
+  const d = new Date(y, mo - 1, 1);
+  d.setMonth(d.getMonth() - 1);
+  return monthKey(d);
+}
+// =========================
+
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ApiOk<any> | ApiErr>
+  res: NextApiResponse<ApiOk<any> | ApiErr | any>,
 ) {
   try {
     if (!SCRIPT_URL) {
@@ -121,9 +171,11 @@ export default async function handler(
     }
 
     // =========================
-    // POST (WRITE): save / update / delete
+    // POST
     // =========================
     if (req.method === "POST") {
+      const qAction = String(req.query.action || "").trim();
+
       if (!VTPT_PINS) {
         return res.status(500).json({
           ok: false,
@@ -141,7 +193,7 @@ export default async function handler(
         });
       }
 
-      const pin = getHeaderPin(req);
+      const pin = getAnyPin(req);
       const actor = pin ? pins[pin] : undefined;
 
       if (!actor) {
@@ -150,6 +202,70 @@ export default async function handler(
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
 
+      // =========================
+      // POST approve / rollback / set (local-only)
+      // =========================
+      if (qAction === "approve") {
+        // Only Masie can control cycle
+        if (actor !== "Masie") {
+          return res.status(403).json({
+            ok: false,
+            error: "Access denied. Only Masie can approve the month.",
+          });
+        }
+
+        const body = req.body || {};
+        const mode =
+          typeof body.mode === "string" ? body.mode.trim() : "approve";
+
+        const currentCycleKey =
+          typeof body.currentCycleKey === "string"
+            ? body.currentCycleKey.trim()
+            : "";
+
+        const base = isMonthKey(currentCycleKey)
+          ? currentCycleKey
+          : monthKey(new Date());
+
+        if (mode === "rollback") {
+          const prev = prevMonthKeyFrom(base);
+          return res.status(200).json({
+            ok: true,
+            nextMonthKey: prev,
+            message: `Rollback ✅ Cycle moved to ${prev}.`,
+          });
+        }
+
+        if (mode === "set") {
+          const target =
+            typeof body.targetMonthKey === "string"
+              ? body.targetMonthKey.trim()
+              : "";
+          if (!isMonthKey(target)) {
+            return res.status(400).json({
+              ok: false,
+              error: "Invalid targetMonthKey. Expected YYYY-MM (e.g. 2026-02).",
+            });
+          }
+          return res.status(200).json({
+            ok: true,
+            nextMonthKey: target,
+            message: `Set ✅ Cycle moved to ${target}.`,
+          });
+        }
+
+        // default: approve -> next month
+        const next = nextMonthKeyFrom(base);
+        return res.status(200).json({
+          ok: true,
+          nextMonthKey: next,
+          message: `Approved ✅ Cycle moved to ${next}.`,
+        });
+      }
+
+      // =========================
+      // POST (WRITE): save / update / delete
+      // =========================
       const body = req.body || {};
       const actionRaw = String(body.action || "save").trim();
       const action =

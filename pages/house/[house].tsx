@@ -40,17 +40,61 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
-/* ===== monthly status helpers ===== */
+/* ===== monthly status helpers (approval-driven cycle) ===== */
 
 function monthKey(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function isLoggedThisMonth(reading?: Reading) {
+function monthKeyFromDateString(dateStr: string) {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  return monthKey(d);
+}
+
+function currentMonthKey() {
+  return monthKey(new Date());
+}
+
+function readCycleKeyFromStorage(): string | null {
+  try {
+    const raw = (localStorage.getItem("vtpt_cycle_month") || "").trim();
+    return raw.length ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function computeEffectiveCycleKey(latestMap: Record<string, Reading>) {
+  const stored = readCycleKeyFromStorage();
+  if (stored) return stored;
+
+  // If no stored cycle yet, anchor to the newest reading month across rooms
+  // (keeps last month visible until admin presses Approve).
+  let newestISO: string | null = null;
+  for (const r of Object.values(latestMap || {})) {
+    if (!r?.date) continue;
+    if (!newestISO) newestISO = r.date;
+    else {
+      const a = new Date(r.date).getTime();
+      const b = new Date(newestISO).getTime();
+      if (!Number.isNaN(a) && (Number.isNaN(b) || a > b)) newestISO = r.date;
+    }
+  }
+
+  if (newestISO) {
+    const mk = monthKeyFromDateString(newestISO);
+    if (mk && mk !== "unknown") return mk;
+  }
+
+  return currentMonthKey();
+}
+
+function isLoggedInCycleMonth(reading: Reading | undefined, cycleKey: string) {
   if (!reading?.date) return false;
-  const parsed = new Date(reading.date);
-  if (Number.isNaN(parsed.getTime())) return false;
-  return monthKey(parsed) === monthKey(new Date());
+  const mk = monthKeyFromDateString(reading.date);
+  if (!mk || mk === "unknown") return false;
+  return mk === cycleKey;
 }
 
 function isResolvedNote(note?: string) {
@@ -80,10 +124,13 @@ export default function HousePage() {
   const [loading, setLoading] = useState(true);
 
   const [houseHistory, setHouseHistory] = useState<Record<string, Reading[]>>(
-    {}
+    {},
   );
 
   const [status, setStatus] = useState<string>("");
+
+  // NEW: approval-driven cycle month key (global)
+  const [cycleKey, setCycleKey] = useState<string>("");
 
   useEffect(() => {
     if (!house) return;
@@ -93,22 +140,30 @@ export default function HousePage() {
     const list = all[house] || [];
     setRooms(list);
 
+    // preload cycle key
+    setCycleKey(readCycleKeyFromStorage() || "");
+
     // 2) load cached latest
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+      localStorage.getItem(latestKey(house)),
     );
 
     if (cachedLatest?.data?.length) {
       const m: Record<string, Reading> = {};
       cachedLatest.data.forEach((r) => (m[r.room] = r));
       setLatestMap(m);
+
+      // if cycle key not set, anchor it to newest cached
+      if (!readCycleKeyFromStorage()) {
+        setCycleKey(computeEffectiveCycleKey(m));
+      }
     } else {
       setLatestMap({});
     }
 
     // 2b) load cached history
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
+      localStorage.getItem(historyKey(house)),
     );
 
     if (cachedHist?.data) {
@@ -124,7 +179,7 @@ export default function HousePage() {
       setStatus(
         `Cached: latest ${
           latestStamp ? timeText(latestStamp) : "—"
-        } • history ${histStamp ? timeText(histStamp) : "—"}`
+        } • history ${histStamp ? timeText(histStamp) : "—"}`,
       );
     } else {
       setStatus("No cache yet");
@@ -135,7 +190,7 @@ export default function HousePage() {
       setLoading(true);
       try {
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
+          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1.data) ? j1.data : [];
@@ -146,13 +201,16 @@ export default function HousePage() {
 
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr })
+          JSON.stringify({ savedAt: Date.now(), data: arr }),
         );
+
+        // compute effective cycle key (stored wins, otherwise newest reading month)
+        setCycleKey(computeEffectiveCycleKey(m));
 
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house
-          )}&limitPerRoom=24`
+            house,
+          )}&limitPerRoom=24`,
         );
         const j2 = await r2.json();
         const hist: Record<string, Reading[]> =
@@ -162,7 +220,7 @@ export default function HousePage() {
 
         localStorage.setItem(
           historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: hist })
+          JSON.stringify({ savedAt: Date.now(), data: hist }),
         );
 
         setStatus(`Updated (${new Date().toLocaleTimeString()})`);
@@ -175,6 +233,12 @@ export default function HousePage() {
   }, [house]);
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
+
+  const effectiveCycleKey = useMemo(() => {
+    const computed = cycleKey?.trim();
+    if (computed) return computed;
+    return computeEffectiveCycleKey(latestMap);
+  }, [cycleKey, latestMap]);
 
   return (
     <main
@@ -204,44 +268,46 @@ export default function HousePage() {
           <div style={{ fontSize: 12, opacity: 0.6 }}>
             {loading ? "Refreshing…" : status}
           </div>
+          <div style={{ fontSize: 11, opacity: 0.45, marginTop: 2 }}>
+            Cycle month: {effectiveCycleKey}
+          </div>
         </div>
       </div>
 
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
-          const loggedThisMonth = isLoggedThisMonth(latest);
+          const loggedInCycle = isLoggedInCycleMonth(latest, effectiveCycleKey);
 
-          // Your new rules:
+          // Your icon rules (now cycle-aware):
           // - no log -> no icon
           // - logged -> check
           // - have note -> warning
           // - logged + note -> warning (no check)
           // - note contains "resolved" -> check
-          const showAnyIcon = loggedThisMonth;
-          const noteExistsThisMonth = loggedThisMonth && hasAnyNote(latest);
-          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
-          const resolvedNote =
-            loggedThisMonth && noteExistsThisMonth && !unresolvedNote;
+          const showAnyIcon = loggedInCycle;
+          const noteExists = loggedInCycle && hasAnyNote(latest);
+          const unresolvedNote = loggedInCycle && hasUnresolvedNote(latest);
+          const resolvedNote = loggedInCycle && noteExists && !unresolvedNote;
 
-          // Pick ONE icon only (per your rules)
+          // Pick ONE icon only
           const iconSrc = !showAnyIcon
             ? null
             : unresolvedNote
-            ? "/icons/warning.png"
-            : "/icons/check.png";
+              ? "/icons/warning.png"
+              : "/icons/check.png";
 
           const iconAlt = !showAnyIcon
             ? ""
             : unresolvedNote
-            ? "Has note"
-            : "Logged";
+              ? "Has note"
+              : "Logged";
 
-          // If not logged this month, show empty meters on house list
-          const dienDisplay = loggedThisMonth
+          // If not logged in cycle month, show empty meters on house list
+          const dienDisplay = loggedInCycle
             ? displayMeter(latest?.dien)
             : "---";
-          const nuocDisplay = loggedThisMonth
+          const nuocDisplay = loggedInCycle
             ? displayMeter(latest?.nuoc)
             : "---";
 
@@ -249,7 +315,7 @@ export default function HousePage() {
             <Link
               key={room}
               href={`/room/${encodeURIComponent(
-                room
+                room,
               )}?house=${encodeURIComponent(house)}`}
               style={{
                 display: "grid",

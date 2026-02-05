@@ -85,7 +85,7 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 
   const key = latestKey(house);
   const cached = safeJsonParse<CacheEnvelope<Reading[]>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data = Array.isArray(cached?.data) ? cached!.data.slice() : [];
@@ -100,13 +100,13 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 function writeHouseHistoryRoomListToCache(
   house: string,
   room: string,
-  nextList: Reading[]
+  nextList: Reading[],
 ) {
   if (!house || !room) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -120,13 +120,13 @@ function writeHouseHistoryRoomListToCache(
 function upsertHouseHistoryCache(
   house: string,
   reading: Reading,
-  maxPerRoom = 24
+  maxPerRoom = 24,
 ) {
   if (!house) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -272,7 +272,7 @@ export default function RoomPage() {
 
     setLoadingLatest(true);
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+      localStorage.getItem(latestKey(house)),
     );
     const foundLatest =
       cachedLatest?.data?.find((x) => x.room === room) || null;
@@ -281,7 +281,7 @@ export default function RoomPage() {
 
     setLoadingHistory(true);
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
+      localStorage.getItem(historyKey(house)),
     );
     const list = cachedHist?.data?.[room];
     setHistory(Array.isArray(list) ? list : []);
@@ -292,10 +292,10 @@ export default function RoomPage() {
     if (!house) return;
 
     const latestCache = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+      localStorage.getItem(latestKey(house)),
     );
     const histCache = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
+      localStorage.getItem(historyKey(house)),
     );
 
     const latestFresh =
@@ -308,28 +308,28 @@ export default function RoomPage() {
     try {
       if (!latestFresh) {
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
+          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr })
+          JSON.stringify({ savedAt: Date.now(), data: arr }),
         );
       }
 
       if (!histFresh) {
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house
-          )}&limitPerRoom=24`
+            house,
+          )}&limitPerRoom=24`,
         );
         const j2 = await r2.json();
         const data: Record<string, Reading[]> =
           j2 && j2.ok && j2.data ? j2.data : {};
         localStorage.setItem(
           historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data })
+          JSON.stringify({ savedAt: Date.now(), data }),
         );
       }
 
@@ -343,7 +343,7 @@ export default function RoomPage() {
     if (!room) return;
     try {
       const latestRes = await fetch(
-        `/api/meter?room=${encodeURIComponent(room)}&action=latest`
+        `/api/meter?room=${encodeURIComponent(room)}&action=latest`,
       );
       const latestJson = await latestRes.json();
       const latestData: Reading | null = latestJson?.data || null;
@@ -366,7 +366,7 @@ export default function RoomPage() {
     setLogErr(null);
     try {
       const r = await fetch(
-        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`
+        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`,
       );
       const j = await r.json();
       if (!j?.ok) {
@@ -393,7 +393,7 @@ export default function RoomPage() {
   function sortNewestFirst(list: Reading[]) {
     const next = Array.isArray(list) ? list.slice() : [];
     next.sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
     );
     return next;
   }
@@ -464,12 +464,12 @@ export default function RoomPage() {
       setDienInput(
         typeof latest.dien === "number" && Number.isFinite(latest.dien)
           ? String(latest.dien)
-          : ""
+          : "",
       );
       setNuocInput(
         typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
           ? String(latest.nuoc)
-          : ""
+          : "",
       );
       setNoteInput(String(latest.note ?? ""));
     } else {
@@ -489,12 +489,12 @@ export default function RoomPage() {
     setDienInput(
       typeof r.dien === "number" && Number.isFinite(r.dien)
         ? String(r.dien)
-        : ""
+        : "",
     );
     setNuocInput(
       typeof r.nuoc === "number" && Number.isFinite(r.nuoc)
         ? String(r.nuoc)
-        : ""
+        : "",
     );
     setNoteInput(String(r.note ?? ""));
   }
@@ -551,7 +551,7 @@ export default function RoomPage() {
       if (isEditing && editing) {
         setHistory((prev) => {
           const replaced = prev.map((x) =>
-            x.id === editing.id && x.date === editing.date ? optimistic : x
+            x.id === editing.id && x.date === editing.date ? optimistic : x,
           );
           const next = sortNewestFirst(replaced).slice(0, 24);
           writeHouseHistoryRoomListToCache(house, room, next);
@@ -634,7 +634,7 @@ export default function RoomPage() {
 
     setHistory((prev) => {
       const next = prev.filter(
-        (x) => !(x.id === editing.id && x.date === editing.date)
+        (x) => !(x.id === editing.id && x.date === editing.date),
       );
       const sorted = sortNewestFirst(next).slice(0, 24);
 
@@ -711,10 +711,10 @@ export default function RoomPage() {
         diff === null
           ? undefined
           : diff > 0
-          ? "#16a34a"
-          : diff < 0
-          ? "#dc2626"
-          : undefined;
+            ? "#16a34a"
+            : diff < 0
+              ? "#dc2626"
+              : undefined;
 
       const d = new Date(row.date);
       const safeDate = isNaN(d.getTime()) ? null : d;
@@ -1076,7 +1076,7 @@ export default function RoomPage() {
               e.preventDefault();
               setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter điện"
+            placeholder="Ghi số điện"
           />
 
           <Field
@@ -1088,13 +1088,11 @@ export default function RoomPage() {
               e.preventDefault();
               setNuocInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Enter nước"
+            placeholder="Ghi số nước"
           />
 
           <div style={{ display: "grid", gap: 6 }}>
-            <div style={{ fontWeight: 800, marginLeft: 2 }}>
-              Note (optional)
-            </div>
+            <div style={{ fontWeight: 800, marginLeft: 2 }}>Ghi chú</div>
             <div
               style={{
                 background: "#fff",

@@ -11,7 +11,13 @@ const VTPT_ADMIN_PINS = (process.env.VTPT_ADMIN_PINS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-type ApiOk<T> = { ok: true; data?: T; message?: string };
+// Flexible ok type so we can return {data} OR {nextMonthKey,...} without TS drama
+type ApiOk<T = any> = {
+  ok: true;
+  data?: T;
+  message?: string;
+  [k: string]: any;
+};
 type ApiErr = { ok: false; error: string };
 
 function getPin(req: NextApiRequest): string {
@@ -46,7 +52,7 @@ function buildScriptUrl(params: Record<string, string>) {
 }
 
 function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test(s);
+  return /^\d{4}-\d{2}$/.test(String(s || "").trim());
 }
 
 function monthKey(d = new Date()) {
@@ -73,7 +79,7 @@ async function scriptCycleSet(month: string) {
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ApiOk<any> | ApiErr>,
+  res: NextApiResponse<ApiOk | ApiErr>,
 ) {
   try {
     if (!SCRIPT_URL || !SCRIPT_TOKEN) {
@@ -88,13 +94,32 @@ export default async function handler(
     if (req.method === "GET") {
       const action = String(req.query.action || "").trim();
 
+      if (!action) {
+        return res.status(400).json({ ok: false, error: "Missing action" });
+      }
+
       if (action === "cycleGet") {
         const url = buildScriptUrl({ action: "cycleGet" });
         const { status, json } = await fetchJson(url);
         return res.status(status).json(json);
       }
 
-      const url = buildScriptUrl(req.query as Record<string, string>);
+      // Only pass through known query keys to avoid Next's query shape weirdness
+      const room = String(req.query.room || "").trim();
+      const house = String(req.query.house || "").trim();
+      const limit = req.query.limit ? String(req.query.limit) : "";
+      const limitPerRoom = req.query.limitPerRoom
+        ? String(req.query.limitPerRoom)
+        : "";
+
+      const url = buildScriptUrl({
+        action,
+        room,
+        house,
+        limit,
+        limitPerRoom,
+      });
+
       const { status, json } = await fetchJson(url);
       return res.status(status).json(json);
     }
@@ -137,7 +162,12 @@ export default async function handler(
         const next = nextMonth(current);
         const { status, json } = await scriptCycleSet(next);
 
-        return res.status(status).json({
+        // If Apps Script failed, don't pretend success
+        if (!json?.ok || status >= 400) {
+          return res.status(status).json(json);
+        }
+
+        return res.status(200).json({
           ok: true,
           nextMonthKey: next,
           message: `Approved ✅ Cycle moved to ${next}`,

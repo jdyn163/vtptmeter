@@ -16,6 +16,7 @@ type Reading = {
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
 const TZ = "Asia/Ho_Chi_Minh";
+const CYCLE_ROLLOVER_DAY = 25;
 
 function formatDateShort(d: Date) {
   return d.toLocaleDateString();
@@ -59,6 +60,8 @@ function isMonthKey(s: string) {
   return /^\d{4}-\d{2}$/.test((s || "").trim());
 }
 
+/* ===== month key (VN timezone) ===== */
+
 function monthKeyVN(date = new Date()) {
   try {
     const fmt = new Intl.DateTimeFormat("en-CA", {
@@ -78,15 +81,73 @@ function monthKeyVN(date = new Date()) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
-function monthKeyFromDateStringVN(dateStr: string) {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "unknown";
-  return monthKeyVN(d);
-}
-
 function currentMonthKeyVN() {
   return monthKeyVN(new Date());
 }
+
+/**
+ * IMPORTANT FOR YOUR WORKFLOW:
+ * A "cycle month key" (YYYY-MM) needs a date string that belongs to that month
+ * so the UI grouping + inCycle checks work.
+ *
+ * We'll represent a cycle-month record as the 1st of that month at noon local time.
+ * (Noon avoids timezone edge cases shifting to previous day in UTC.)
+ */
+function isoForCycleMonthKey(cycleKey: string) {
+  const m = String(cycleKey || "").trim();
+  if (!isMonthKey(m)) return new Date().toISOString();
+  return `${m}-01T12:00:00`;
+}
+
+/* ===== cycle helpers (approval-driven month, with rollover day) ===== */
+
+function nextMonthKey(key: string) {
+  if (!isMonthKey(key)) return key;
+  const [yy, mm] = key.split("-").map(Number);
+  const d = new Date(yy, (mm || 1) - 1, 1);
+  d.setMonth(d.getMonth() + 1);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+}
+
+// VN year/month/day from an ISO-ish string
+function vnYMD(dateStr: string): { y: number; m: number; d: number } | null {
+  const dt = new Date(dateStr);
+  if (Number.isNaN(dt.getTime())) return null;
+
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = fmt.formatToParts(dt);
+    const y = Number(parts.find((p) => p.type === "year")?.value || "");
+    const m = Number(parts.find((p) => p.type === "month")?.value || "");
+    const d = Number(parts.find((p) => p.type === "day")?.value || "");
+    if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+      return { y, m, d };
+    }
+  } catch {
+    // ignore
+  }
+
+  // fallback local
+  return { y: dt.getFullYear(), m: dt.getMonth() + 1, d: dt.getDate() };
+}
+
+// Convert a real reading date -> business cycle key (with rollover)
+function cycleKeyFromReadingDate(dateStr: string): string | null {
+  const parts = vnYMD(dateStr);
+  if (!parts) return null;
+
+  const mk = monthKeyFromParts(parts.y, parts.m);
+  if (!isMonthKey(mk)) return null;
+
+  return parts.d >= CYCLE_ROLLOVER_DAY ? nextMonthKey(mk) : mk;
+}
+
+/* ===== local month key (for cache de-dupe) ===== */
 
 function monthKeyFromDateStringLocal(dateStr: string) {
   const d = new Date(dateStr);
@@ -315,7 +376,7 @@ export default function RoomPage() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
-  // NEW: third tab in History section
+  // third tab in History section
   const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
@@ -332,13 +393,13 @@ export default function RoomPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // NEW: log state
+  // log state
   const [loadingLog, setLoadingLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
   // Fix A: do not show cycle until backend answered at least once
-  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null); // last known backend cycle
+  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null);
   const [cycleLoaded, setCycleLoaded] = useState(false);
 
   const TTL_MS = 2 * 60 * 1000;
@@ -350,20 +411,18 @@ export default function RoomPage() {
       setCycleLoaded(true);
       return;
     }
-
-    // Fix A rule:
-    // - If never loaded: keep "…" (no VN fallback for display).
-    // - If loaded once: keep last known value (no flip).
-    // (No state change needed.)
+    // Fix A rule: keep "…" until loaded once, then keep last known value.
   }
 
   function isInCycleMonth(dateStr?: string) {
     if (!dateStr) return false;
-    const mk = monthKeyFromDateStringVN(dateStr);
-    if (!mk || mk === "unknown") return false;
     const ck = (cycleMonthKey || "").trim();
     if (!ck || !isMonthKey(ck)) return false;
-    return mk === ck;
+
+    const effective = cycleKeyFromReadingDate(dateStr);
+    if (!effective || !isMonthKey(effective)) return false;
+
+    return effective === ck;
   }
 
   function loadFromCaches() {
@@ -533,7 +592,7 @@ export default function RoomPage() {
     loadFromCaches();
     backgroundRefreshIfStale();
 
-    // KEY FIX: always sync shared cycle on page entry
+    // always sync shared cycle on page entry
     void syncCycle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
@@ -569,8 +628,19 @@ export default function RoomPage() {
     return "…";
   }, [mounted, cycleLoaded, cycleMonthKey]);
 
-  const inCycle = mounted ? !!(latest && isInCycleMonth(latest.date)) : false;
-  const buttonLabel = latest ? "Edit" : "Add";
+  // Cycle reading (from history), not "latest"
+  const cycleReading = useMemo(() => {
+    if (!cycleLoaded) return null;
+    const ck = (cycleMonthKey || "").trim();
+    if (!ck || !isMonthKey(ck)) return null;
+
+    const list = sortNewestFirst(history || []);
+    return list.find((r) => isInCycleMonth(r.date)) || null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, cycleLoaded, cycleMonthKey]);
+
+  const inCycle = mounted ? !!cycleReading : false;
+  const buttonLabel = cycleReading ? "Edit" : "Add";
 
   function openSheet() {
     setMsg(null);
@@ -578,18 +648,20 @@ export default function RoomPage() {
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    if (latest && inCycle) {
+    if (cycleReading) {
       setDienInput(
-        typeof latest.dien === "number" && Number.isFinite(latest.dien)
-          ? String(latest.dien)
+        typeof cycleReading.dien === "number" &&
+          Number.isFinite(cycleReading.dien)
+          ? String(cycleReading.dien)
           : "",
       );
       setNuocInput(
-        typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
-          ? String(latest.nuoc)
+        typeof cycleReading.nuoc === "number" &&
+          Number.isFinite(cycleReading.nuoc)
+          ? String(cycleReading.nuoc)
           : "",
       );
-      setNoteInput(String(latest.note ?? ""));
+      setNoteInput(String(cycleReading.note ?? ""));
     } else {
       setDienInput("");
       setNuocInput("");
@@ -656,22 +728,53 @@ export default function RoomPage() {
     setSaving(true);
     setShowConfirmSheet(false);
 
+    const cycleKeyToUse =
+      cycleLoaded && cycleMonthKey && isMonthKey(cycleMonthKey)
+        ? cycleMonthKey
+        : currentMonthKeyVN();
+
+    const cycleTarget =
+      !isEditing && cycleReading
+        ? { id: cycleReading.id, date: cycleReading.date }
+        : undefined;
+
+    const target =
+      isEditing && editing
+        ? { id: editing.id, date: editing.date }
+        : cycleTarget;
+
+    const willUpdate = !!target;
+
+    const effectiveDate =
+      isEditing && editing?.date
+        ? editing.date
+        : cycleReading?.date
+          ? cycleReading.date
+          : isoForCycleMonthKey(cycleKeyToUse);
+
     const optimistic: Reading = {
       room,
-      date: editing?.date ?? new Date().toISOString(),
-      id: editing?.id ?? latest?.id ?? 0,
+      date: effectiveDate,
+      id: target?.id ?? latest?.id ?? 0,
       dien: dienNum,
       nuoc: nuocNum,
       note: noteInput.trim(),
     };
 
     if (house) {
-      if (isEditing && editing) {
+      if (willUpdate && target) {
         setHistory((prev) => {
           const replaced = prev.map((x) =>
-            x.id === editing.id && x.date === editing.date ? optimistic : x,
+            x.id === target.id && x.date === target.date ? optimistic : x,
           );
-          const next = sortNewestFirst(replaced).slice(0, 24);
+
+          const exists = prev.some(
+            (x) => x.id === target.id && x.date === target.date,
+          );
+          const next = exists
+            ? sortNewestFirst(replaced).slice(0, 24)
+            : upsertMonthlyHistory(prev, optimistic, 24);
+
           writeHouseHistoryRoomListToCache(house, room, next);
           recomputeLatestFromHistory(next);
           return next;
@@ -710,15 +813,14 @@ export default function RoomPage() {
           "x-vtpt-pin": pin,
         },
         body: JSON.stringify({
-          action: isEditing ? "update" : "save",
+          action: willUpdate ? "update" : "save",
           room,
           dien: dienNum,
           nuoc: nuocNum,
           note: noteInput.trim(),
-          target:
-            isEditing && editing
-              ? { id: editing.id, date: editing.date }
-              : undefined,
+          cycleMonthKey: cycleKeyToUse,
+          date: effectiveDate,
+          target,
         }),
       });
 
@@ -733,7 +835,6 @@ export default function RoomPage() {
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
 
-      // keep cycle in sync (best effort)
       await syncCycle();
 
       setSaving(false);
@@ -851,24 +952,22 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
-  // "This month reading" is approval-driven (cycle month), not calendar-driven.
-  // Fix A: don't show cycle numbers until cycleLoaded === true (prevents flip).
   const showCycleNumbers = cycleLoaded && inCycle;
 
   const latestDien =
     showCycleNumbers &&
-    latest &&
-    typeof latest.dien === "number" &&
-    Number.isFinite(latest.dien)
-      ? latest.dien
+    cycleReading &&
+    typeof cycleReading.dien === "number" &&
+    Number.isFinite(cycleReading.dien)
+      ? cycleReading.dien
       : null;
 
   const latestNuoc =
     showCycleNumbers &&
-    latest &&
-    typeof latest.nuoc === "number" &&
-    Number.isFinite(latest.nuoc)
-      ? latest.nuoc
+    cycleReading &&
+    typeof cycleReading.nuoc === "number" &&
+    Number.isFinite(cycleReading.nuoc)
+      ? cycleReading.nuoc
       : null;
 
   const confirmDien = parseOptionalNumberFromInput(dienInput);

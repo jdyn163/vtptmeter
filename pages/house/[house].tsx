@@ -17,6 +17,10 @@ type CacheEnvelope<T> = { savedAt: number; data: T };
 
 const TZ = "Asia/Ho_Chi_Minh";
 
+// Your business rule: worker usually records near end of month for next cycle.
+// If date-of-month >= CYCLE_ROLLOVER_DAY, treat as next month.
+const CYCLE_ROLLOVER_DAY = 25;
+
 function latestKey(house: string) {
   return `vtpt_houseLatest_${house}`;
 }
@@ -86,6 +90,75 @@ function currentMonthKeyVN() {
   return monthKeyVN(new Date());
 }
 
+/* ===== VN date parts helper ===== */
+
+function vnYMD(dateStr: string): { y: number; m: number; d: number } | null {
+  const dt = new Date(dateStr);
+  if (Number.isNaN(dt.getTime())) return null;
+
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = fmt.formatToParts(dt);
+    const y = Number(parts.find((p) => p.type === "year")?.value || "");
+    const m = Number(parts.find((p) => p.type === "month")?.value || "");
+    const d = Number(parts.find((p) => p.type === "day")?.value || "");
+    if (
+      Number.isFinite(y) &&
+      Number.isFinite(m) &&
+      Number.isFinite(d) &&
+      m >= 1 &&
+      m <= 12 &&
+      d >= 1 &&
+      d <= 31
+    ) {
+      return { y, m, d };
+    }
+  } catch {
+    // ignore
+  }
+
+  // fallback: local parse
+  const y = dt.getFullYear();
+  const m = dt.getMonth() + 1;
+  const d = dt.getDate();
+  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+    return { y, m, d };
+  }
+  return null;
+}
+
+function nextMonthKey(key: string) {
+  if (!isMonthKey(key)) return key;
+  const [yy, mm] = key.split("-").map(Number);
+  const d = new Date(yy, (mm || 1) - 1, 1);
+  d.setMonth(d.getMonth() + 1);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+}
+
+/**
+ * Map a reading's physical date -> the BUSINESS cycle month it should count for.
+ * Rule:
+ * - if recorded on/after day CYCLE_ROLLOVER_DAY, treat as next month cycle
+ * - else treat as same month
+ */
+function cycleKeyFromReadingDate(dateStr: string): string | null {
+  const parts = vnYMD(dateStr);
+  if (!parts) return null;
+
+  const mk = monthKeyFromParts(parts.y, parts.m);
+  if (!isMonthKey(mk)) return null;
+
+  if (parts.d >= CYCLE_ROLLOVER_DAY) {
+    return nextMonthKey(mk);
+  }
+  return mk;
+}
+
 /* ===== Shared cycle (backend) ===== */
 
 async function fetchBackendCycleKeySafe(): Promise<string | null> {
@@ -122,13 +195,6 @@ async function fetchBackendCycleKeySafe(): Promise<string | null> {
 
 /* ===== monthly status helpers (cycle-driven) ===== */
 
-function isLoggedInCycleMonth(reading: Reading | undefined, cycleKey: string) {
-  if (!reading?.date) return false;
-  const mk = monthKeyFromDateStringVN(reading.date);
-  if (!mk || mk === "unknown") return false;
-  return mk === cycleKey;
-}
-
 function isResolvedNote(note?: string) {
   if (!note) return false;
   return /\bresolved\b/i.test(note);
@@ -138,6 +204,27 @@ function hasUnresolvedNote(reading?: Reading) {
   const note = reading?.note?.trim();
   if (!note) return false;
   return !isResolvedNote(note);
+}
+
+/**
+ * New: cycle-aware check using your real-world collection window.
+ * This makes:
+ * - Jan 28 reading count for Feb cycle
+ * - Feb 28 reading count for Mar cycle
+ */
+function isLoggedInBusinessCycle(
+  reading: Reading | undefined,
+  cycleKey: string,
+) {
+  if (!reading?.date) return false;
+
+  const ck = (cycleKey || "").trim();
+  if (!ck || !isMonthKey(ck)) return false;
+
+  const effective = cycleKeyFromReadingDate(reading.date);
+  if (!effective || !isMonthKey(effective)) return false;
+
+  return effective === ck;
 }
 
 /* =================================== */
@@ -326,7 +413,7 @@ export default function HousePage() {
 
           const loggedInCycle =
             mounted && effectiveCycleKey !== "…"
-              ? isLoggedInCycleMonth(latest, effectiveCycleKey)
+              ? isLoggedInBusinessCycle(latest, effectiveCycleKey)
               : false;
 
           const unresolvedNote = loggedInCycle && hasUnresolvedNote(latest);
@@ -405,6 +492,11 @@ export default function HousePage() {
 
       <div style={{ marginTop: 14, fontSize: 12, opacity: 0.5 }}>
         History cached rooms: {Object.keys(houseHistory || {}).length}
+      </div>
+
+      <div style={{ marginTop: 8, fontSize: 11, opacity: 0.4 }}>
+        Cycle rollover day: {CYCLE_ROLLOVER_DAY} (end-of-month readings count
+        for next cycle)
       </div>
     </main>
   );

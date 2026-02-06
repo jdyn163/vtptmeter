@@ -1,3 +1,4 @@
+// pages/room/[room].tsx
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
@@ -13,6 +14,8 @@ type Reading = {
 };
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
+
+const TZ = "Asia/Ho_Chi_Minh";
 
 function formatDateShort(d: Date) {
   return d.toLocaleDateString();
@@ -44,27 +47,60 @@ function safeJsonParse<T>(s: string | null): T | null {
   }
 }
 
-function monthKeyFromDateString(dateStr: string) {
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function monthKeyFromParts(y: number, m: number) {
+  return `${y}-${pad2(m)}`;
+}
+
+function isMonthKey(s: string) {
+  return /^\d{4}-\d{2}$/.test((s || "").trim());
+}
+
+function monthKeyVN(date = new Date()) {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+    });
+    const parts = fmt.formatToParts(date);
+    const y = Number(parts.find((p) => p.type === "year")?.value || "");
+    const m = Number(parts.find((p) => p.type === "month")?.value || "");
+    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
+      return monthKeyFromParts(y, m);
+    }
+  } catch {
+    // fall through
+  }
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+}
+
+function monthKeyFromDateStringVN(dateStr: string) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "unknown";
+  return monthKeyVN(d);
+}
+
+function currentMonthKeyVN() {
+  return monthKeyVN(new Date());
+}
+
+function monthKeyFromDateStringLocal(dateStr: string) {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return "unknown";
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function currentMonthKey() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function isThisMonth(dateStr?: string) {
-  if (!dateStr) return false;
-  return monthKeyFromDateString(dateStr) === currentMonthKey();
-}
-
 function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
-  const mk = monthKeyFromDateString(incoming.date);
+  const mk = monthKeyFromDateStringLocal(incoming.date);
 
   const next = Array.isArray(list) ? list.slice() : [];
-  const filtered = next.filter((r) => monthKeyFromDateString(r.date) !== mk);
+  const filtered = next.filter(
+    (r) => monthKeyFromDateStringLocal(r.date) !== mk,
+  );
 
   filtered.unshift(incoming);
 
@@ -181,6 +217,40 @@ function getReadingValue(row: Reading, tab: "dien" | "nuoc"): number | null {
 }
 // ----------------------------------------------------------------
 
+/* ===== Shared cycle (backend) ===== */
+async function fetchBackendCycleKeySafe(): Promise<string | null> {
+  try {
+    const r = await fetch("/api/meter?action=cycleGet", {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
+    });
+    const j = await r.json();
+
+    const raw =
+      typeof j?.data === "string"
+        ? j.data
+        : typeof j?.cycleMonthKey === "string"
+          ? j.cycleMonthKey
+          : typeof j?.month === "string"
+            ? j.month
+            : typeof j?.monthKey === "string"
+              ? j.monthKey
+              : typeof j?.current === "string"
+                ? j.current
+                : "";
+
+    const key = String(raw || "").trim();
+    return isMonthKey(key) ? key : null;
+  } catch {
+    return null;
+  }
+}
+/* ================================= */
+
 function Field({
   label,
   value,
@@ -237,6 +307,8 @@ export default function RoomPage() {
   const room = (router.query.room as string) || "";
   const house = (router.query.house as string) || "";
 
+  const [mounted, setMounted] = useState(false);
+
   const [loadingLatest, setLoadingLatest] = useState(true);
   const [latest, setLatest] = useState<Reading | null>(null);
 
@@ -265,7 +337,28 @@ export default function RoomPage() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
+  // NEW: global cycle month key (shared)
+  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null);
+
   const TTL_MS = 2 * 60 * 1000;
+
+  async function syncCycle() {
+    const backend = await fetchBackendCycleKeySafe();
+    if (backend) {
+      setCycleMonthKey(backend);
+      return;
+    }
+    setCycleMonthKey(currentMonthKeyVN());
+  }
+
+  function isInCycleMonth(dateStr?: string) {
+    if (!dateStr) return false;
+    const mk = monthKeyFromDateStringVN(dateStr);
+    if (!mk || mk === "unknown") return false;
+    const ck = (cycleMonthKey || "").trim();
+    if (!ck || !isMonthKey(ck)) return false;
+    return mk === ck;
+  }
 
   function loadFromCaches() {
     if (!room || !house) return;
@@ -309,6 +402,7 @@ export default function RoomPage() {
       if (!latestFresh) {
         const r1 = await fetch(
           `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
+          { cache: "no-store" },
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
@@ -323,6 +417,7 @@ export default function RoomPage() {
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
             house,
           )}&limitPerRoom=24`,
+          { cache: "no-store" },
         );
         const j2 = await r2.json();
         const data: Record<string, Reading[]> =
@@ -344,6 +439,7 @@ export default function RoomPage() {
     try {
       const latestRes = await fetch(
         `/api/meter?room=${encodeURIComponent(room)}&action=latest`,
+        { cache: "no-store" },
       );
       const latestJson = await latestRes.json();
       const latestData: Reading | null = latestJson?.data || null;
@@ -367,6 +463,7 @@ export default function RoomPage() {
     try {
       const r = await fetch(
         `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`,
+        { cache: "no-store" },
       );
       const j = await r.json();
       if (!j?.ok) {
@@ -409,6 +506,10 @@ export default function RoomPage() {
   }
 
   useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
     if (!room) return;
 
     setShowSheet(false);
@@ -425,6 +526,9 @@ export default function RoomPage() {
 
     loadFromCaches();
     backgroundRefreshIfStale();
+
+    // KEY FIX: always sync shared cycle on page entry
+    void syncCycle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
@@ -450,8 +554,15 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  const hasThisMonth = !!(latest && isThisMonth(latest.date));
-  const buttonLabel = hasThisMonth ? "Edit" : "Add";
+  const effectiveCycleKey = useMemo(() => {
+    if (!mounted) return "…";
+    const k = String(cycleMonthKey || "").trim();
+    if (k && isMonthKey(k)) return k;
+    return currentMonthKeyVN();
+  }, [mounted, cycleMonthKey]);
+
+  const inCycle = mounted ? !!(latest && isInCycleMonth(latest.date)) : false;
+  const buttonLabel = latest ? "Edit" : "Add";
 
   function openSheet() {
     setMsg(null);
@@ -459,8 +570,7 @@ export default function RoomPage() {
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    // ✅ IMPORTANT: New month should be EMPTY (do NOT carry last month's numbers)
-    if (latest && isThisMonth(latest.date)) {
+    if (latest && inCycle) {
       setDienInput(
         typeof latest.dien === "number" && Number.isFinite(latest.dien)
           ? String(latest.dien)
@@ -613,8 +723,10 @@ export default function RoomPage() {
       }
 
       await refreshLatestFromNetwork();
-      // If user is on Log tab, refresh it too
       if (tab === "log") await refreshLogFromNetwork();
+
+      // if we just wrote a reading for the cycle month, refresh cycle too (cheap + keeps UI honest)
+      await syncCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -678,6 +790,7 @@ export default function RoomPage() {
 
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
+      await syncCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -730,11 +843,11 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
-  // ✅ show "This month reading" as empty unless latest is in THIS month
-  const showThisMonthNumbers = hasThisMonth;
+  // "This month reading" is approval-driven (cycle month), not calendar-driven.
+  const showCycleNumbers = inCycle;
 
   const latestDien =
-    showThisMonthNumbers &&
+    showCycleNumbers &&
     latest &&
     typeof latest.dien === "number" &&
     Number.isFinite(latest.dien)
@@ -742,7 +855,7 @@ export default function RoomPage() {
       : null;
 
   const latestNuoc =
-    showThisMonthNumbers &&
+    showCycleNumbers &&
     latest &&
     typeof latest.nuoc === "number" &&
     Number.isFinite(latest.nuoc)
@@ -781,6 +894,9 @@ export default function RoomPage() {
             {latestDate
               ? `Last recorded: ${formatDateTime(latestDate)}`
               : "No record yet"}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.45, marginTop: 2 }}>
+            Cycle month: {effectiveCycleKey}
           </div>
         </div>
 

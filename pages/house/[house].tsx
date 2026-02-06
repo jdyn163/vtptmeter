@@ -1,3 +1,4 @@
+// pages/house/[house].tsx
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
@@ -14,7 +15,6 @@ type Reading = {
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
-const CYCLE_KEY = "vtpt_cycle_month";
 const TZ = "Asia/Ho_Chi_Minh";
 
 function latestKey(house: string) {
@@ -55,7 +55,7 @@ function isMonthKey(s: string) {
   return /^\d{4}-\d{2}$/.test((s || "").trim());
 }
 
-/* ===== monthly status helpers (approval-driven cycle) ===== */
+/* ===== month key (VN timezone) ===== */
 
 function monthKeyVN(date = new Date()) {
   try {
@@ -71,7 +71,7 @@ function monthKeyVN(date = new Date()) {
       return monthKeyFromParts(y, m);
     }
   } catch {
-    // fall through
+    // ignore
   }
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
@@ -86,41 +86,41 @@ function currentMonthKeyVN() {
   return monthKeyVN(new Date());
 }
 
-function readCycleKeyFromStorage(): string | null {
-  if (typeof window === "undefined") return null;
+/* ===== Shared cycle (backend) ===== */
+
+async function fetchBackendCycleKeySafe(): Promise<string | null> {
   try {
-    const raw = (localStorage.getItem(CYCLE_KEY) || "").trim();
-    if (!raw.length) return null;
-    return isMonthKey(raw) ? raw : null;
+    const r = await fetch("/api/meter?action=cycleGet", {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
+    });
+    const j = await r.json();
+
+    const raw =
+      typeof j?.data === "string"
+        ? j.data
+        : typeof j?.cycleMonthKey === "string"
+          ? j.cycleMonthKey
+          : typeof j?.month === "string"
+            ? j.month
+            : typeof j?.monthKey === "string"
+              ? j.monthKey
+              : typeof j?.current === "string"
+                ? j.current
+                : "";
+
+    const key = String(raw || "").trim();
+    return isMonthKey(key) ? key : null;
   } catch {
     return null;
   }
 }
 
-function computeEffectiveCycleKey(latestMap: Record<string, Reading>) {
-  const stored = readCycleKeyFromStorage();
-  if (stored) return stored;
-
-  // If no stored cycle yet, anchor to the newest reading month across rooms
-  // (keeps last month visible until admin presses Approve).
-  let newestISO: string | null = null;
-  for (const r of Object.values(latestMap || {})) {
-    if (!r?.date) continue;
-    if (!newestISO) newestISO = r.date;
-    else {
-      const a = new Date(r.date).getTime();
-      const b = new Date(newestISO).getTime();
-      if (!Number.isNaN(a) && (Number.isNaN(b) || a > b)) newestISO = r.date;
-    }
-  }
-
-  if (newestISO) {
-    const mk = monthKeyFromDateStringVN(newestISO);
-    if (mk && mk !== "unknown") return mk;
-  }
-
-  return currentMonthKeyVN();
-}
+/* ===== monthly status helpers (cycle-driven) ===== */
 
 function isLoggedInCycleMonth(reading: Reading | undefined, cycleKey: string) {
   if (!reading?.date) return false;
@@ -132,11 +132,6 @@ function isLoggedInCycleMonth(reading: Reading | undefined, cycleKey: string) {
 function isResolvedNote(note?: string) {
   if (!note) return false;
   return /\bresolved\b/i.test(note);
-}
-
-function hasAnyNote(reading?: Reading) {
-  const note = reading?.note?.trim();
-  return !!note;
 }
 
 function hasUnresolvedNote(reading?: Reading) {
@@ -162,8 +157,18 @@ export default function HousePage() {
 
   const [status, setStatus] = useState<string>("");
 
-  // approval-driven cycle month key (global)
+  // IMPORTANT: cycleKey is now from backend (shared across devices)
   const [cycleKey, setCycleKey] = useState<string>("");
+
+  async function syncCycle() {
+    const backend = await fetchBackendCycleKeySafe();
+    if (backend) {
+      setCycleKey(backend);
+      return;
+    }
+    // Offline fallback only (do NOT derive from newest readings, that caused drift)
+    setCycleKey(currentMonthKeyVN());
+  }
 
   useEffect(() => {
     setMounted(true);
@@ -177,10 +182,7 @@ export default function HousePage() {
     const list = all[house] || [];
     setRooms(list);
 
-    // preload cycle key (client-only)
-    setCycleKey(readCycleKeyFromStorage() || "");
-
-    // 2) load cached latest
+    // 2) load caches (for offline + quick paint)
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
       localStorage.getItem(latestKey(house)),
     );
@@ -189,25 +191,16 @@ export default function HousePage() {
       const m: Record<string, Reading> = {};
       cachedLatest.data.forEach((r) => (m[r.room] = r));
       setLatestMap(m);
-
-      // if cycle key not set, anchor it to newest cached
-      if (!readCycleKeyFromStorage()) {
-        setCycleKey(computeEffectiveCycleKey(m));
-      }
     } else {
       setLatestMap({});
     }
 
-    // 2b) load cached history
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
       localStorage.getItem(historyKey(house)),
     );
 
-    if (cachedHist?.data) {
-      setHouseHistory(cachedHist.data || {});
-    } else {
-      setHouseHistory({});
-    }
+    if (cachedHist?.data) setHouseHistory(cachedHist.data || {});
+    else setHouseHistory({});
 
     const latestStamp = cachedLatest?.savedAt;
     const histStamp = cachedHist?.savedAt;
@@ -222,12 +215,16 @@ export default function HousePage() {
       setStatus("No cache yet");
     }
 
-    // 3) fetch fresh in background
+    // 3) Always sync shared cycle first (single source of truth)
+    void syncCycle();
+
+    // 4) fetch fresh in background
     (async () => {
       setLoading(true);
       try {
         const r1 = await fetch(
           `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
+          { cache: "no-store" },
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1.data) ? j1.data : [];
@@ -241,13 +238,11 @@ export default function HousePage() {
           JSON.stringify({ savedAt: Date.now(), data: arr }),
         );
 
-        // compute effective cycle key (stored wins, otherwise newest reading month)
-        setCycleKey(computeEffectiveCycleKey(m));
-
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
             house,
           )}&limitPerRoom=24`,
+          { cache: "no-store" },
         );
         const j2 = await r2.json();
         const hist: Record<string, Reading[]> =
@@ -260,23 +255,30 @@ export default function HousePage() {
           JSON.stringify({ savedAt: Date.now(), data: hist }),
         );
 
+        // re-sync cycle after network calls too (in case approve happened elsewhere)
+        await syncCycle();
+
         setStatus(`Updated (${new Date().toLocaleTimeString()})`);
       } catch {
         setStatus(`Fetch failed (using cache)`);
+        // still try to sync cycle (might fail offline)
+        await syncCycle();
       } finally {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [house]);
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
 
+  // SSR-safe label
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
-    const computed = cycleKey?.trim();
-    if (computed && isMonthKey(computed)) return computed;
-    return computeEffectiveCycleKey(latestMap);
-  }, [mounted, cycleKey, latestMap]);
+    const k = (cycleKey || "").trim();
+    if (k && isMonthKey(k)) return k;
+    return currentMonthKeyVN();
+  }, [mounted, cycleKey]);
 
   return (
     <main
@@ -315,21 +317,21 @@ export default function HousePage() {
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
+
           const loggedInCycle =
             mounted && effectiveCycleKey !== "…"
               ? isLoggedInCycleMonth(latest, effectiveCycleKey)
               : false;
 
-          const showAnyIcon = loggedInCycle;
           const unresolvedNote = loggedInCycle && hasUnresolvedNote(latest);
 
-          const iconSrc = !showAnyIcon
+          const iconSrc = !loggedInCycle
             ? null
             : unresolvedNote
               ? "/icons/warning.png"
               : "/icons/check.png";
 
-          const iconAlt = !showAnyIcon
+          const iconAlt = !loggedInCycle
             ? ""
             : unresolvedNote
               ? "Has note"

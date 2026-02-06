@@ -1,9 +1,9 @@
+// pages/index.tsx
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../lib/rooms";
 import BottomSheet from "../components/BottomSheet";
 
-const CYCLE_KEY = "vtpt_cycle_month";
 const TZ = "Asia/Ho_Chi_Minh";
 
 function pad2(n: number) {
@@ -14,7 +14,11 @@ function monthKeyFromParts(y: number, m: number) {
   return `${y}-${pad2(m)}`;
 }
 
-// timezone-stable month key for Vietnam
+function isMonthKey(s: string) {
+  return /^\d{4}-\d{2}$/.test((s || "").trim());
+}
+
+// timezone-stable month key for Vietnam (offline fallback only)
 function monthKeyVN(date = new Date()) {
   try {
     const fmt = new Intl.DateTimeFormat("en-CA", {
@@ -29,47 +33,47 @@ function monthKeyVN(date = new Date()) {
       return monthKeyFromParts(y, m);
     }
   } catch {
-    // fall through
-  }
-  // fallback (device local)
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
-}
-
-function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test((s || "").trim());
-}
-
-function readCycleKeySafe(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = (localStorage.getItem(CYCLE_KEY) || "").trim();
-    return raw.length ? raw : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCycleKeySafe(key: string) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(CYCLE_KEY, key);
-  } catch {
     // ignore
   }
-}
-
-function getCycleMonthKey(): string {
-  // Single source of truth:
-  // 1) stored cycle if valid
-  // 2) otherwise VN month key
-  const stored = readCycleKeySafe();
-  if (stored && isMonthKey(stored)) return stored;
-  return monthKeyVN(new Date());
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
 // numeric-only helpers
 function digitsOnly(s: string) {
   return String(s ?? "").replace(/[^\d]/g, "");
+}
+
+async function fetchBackendCycleKeySafe(): Promise<string | null> {
+  try {
+    const r = await fetch("/api/meter?action=cycleGet", {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+      },
+    });
+
+    const j = await r.json();
+
+    const raw =
+      typeof j?.data === "string"
+        ? j.data
+        : typeof j?.cycleMonthKey === "string"
+          ? j.cycleMonthKey
+          : typeof j?.month === "string"
+            ? j.month
+            : typeof j?.monthKey === "string"
+              ? j.monthKey
+              : typeof j?.current === "string"
+                ? j.current
+                : "";
+
+    const key = String(raw || "").trim();
+    return isMonthKey(key) ? key : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function Home() {
@@ -80,8 +84,20 @@ export default function Home() {
   // bottom sheet state
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState("");
-  const [cycle, setCycle] = useState<string>(""); // UI-only cycle label
+  const [cycle, setCycle] = useState<string>(""); // UI-only label
   const [mounted, setMounted] = useState(false);
+
+  const canOpen = useMemo(() => !approving, [approving]);
+
+  async function syncCycle() {
+    const backend = await fetchBackendCycleKeySafe();
+    if (backend) {
+      setCycle(backend);
+      return;
+    }
+    // offline fallback only (do NOT persist locally)
+    setCycle(monthKeyVN(new Date()));
+  }
 
   useEffect(() => {
     setMounted(true);
@@ -90,18 +106,16 @@ export default function Home() {
     const keys = Object.keys(data).sort();
     setHouses(keys);
 
-    setCycle(getCycleMonthKey());
+    void syncCycle();
   }, []);
 
   // whenever sheet opens, refresh cycle + clear inputs
   useEffect(() => {
     if (!open) return;
-    setCycle(getCycleMonthKey());
+    void syncCycle();
     setPin("");
     setApproveMsg(null);
   }, [open]);
-
-  const canOpen = useMemo(() => !approving, [approving]);
 
   async function approveNextMonth() {
     const trimmedPin = pin.trim();
@@ -110,7 +124,11 @@ export default function Home() {
       return;
     }
 
-    const currentCycleKey = getCycleMonthKey();
+    // Use current UI cycle if valid; otherwise fetch backend; otherwise fallback VN month
+    const currentCycleKey =
+      cycle && isMonthKey(cycle)
+        ? cycle
+        : (await fetchBackendCycleKeySafe()) || monthKeyVN(new Date());
 
     setApproving(true);
     setApproveMsg(null);
@@ -144,21 +162,12 @@ export default function Home() {
         return;
       }
 
-      const nextMonthKey =
-        typeof data?.nextMonthKey === "string" ? data.nextMonthKey.trim() : "";
-
-      if (nextMonthKey && isMonthKey(nextMonthKey)) {
-        writeCycleKeySafe(nextMonthKey);
-        setCycle(nextMonthKey);
-      }
+      // After approve, ALWAYS re-read backend (single source of truth)
+      await syncCycle();
 
       const msg = data?.message || "Approved ✅";
       setApproveMsg(msg);
       window.alert(msg);
-
-      window.setTimeout(() => {
-        window.location.reload();
-      }, 50);
     } catch (e: any) {
       const msg = e?.message || "Network error. Please try again.";
       setApproveMsg(msg);
@@ -169,7 +178,8 @@ export default function Home() {
     }
   }
 
-  const cycleLabel = mounted ? cycle || getCycleMonthKey() : "…";
+  // Keep SSR stable
+  const cycleLabel = mounted ? cycle || "…" : "…";
 
   return (
     <main

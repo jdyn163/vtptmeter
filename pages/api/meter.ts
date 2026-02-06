@@ -43,6 +43,11 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
+// Build once per invocation (serverless) to avoid reparsing repeatedly
+function getPinsMap(): Record<string, string> {
+  return parsePins(VTPT_PINS_RAW);
+}
+
 function getPin(req: NextApiRequest): string {
   const headerPin = req.headers["x-vtpt-pin"];
   if (typeof headerPin === "string") return headerPin.trim();
@@ -71,8 +76,17 @@ function isUserPin(pin: string) {
   // admin pin is also allowed to do normal user actions
   if (isAdminPin(pin)) return true;
 
-  const map = parsePins(VTPT_PINS_RAW);
+  const map = getPinsMap();
   return !!map[pin];
+}
+
+function actorForPin(pin: string): string | undefined {
+  if (!pin) return undefined;
+
+  // If admin pin is also listed in VTPT_PINS, we can show the name.
+  // If not, still allow admin actions but the actor name may be undefined.
+  const map = getPinsMap();
+  return map[pin];
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
@@ -114,9 +128,15 @@ function nextMonth(key: string) {
   return monthKey(d);
 }
 
-async function scriptCycleSet(month: string) {
+async function scriptCycleSet(month: string, actor?: string) {
   const url = buildScriptUrl({});
-  const payload = { action: "cycleSet", month };
+  const payload: Record<string, any> = { action: "cycleSet", month };
+
+  // Optional: include actor for audit trail if Apps Script supports it
+  if (actor) {
+    payload.actor = actor;
+    payload.by = actor;
+  }
 
   return fetchJson(url, {
     method: "POST",
@@ -178,6 +198,7 @@ export default async function handler(
     if (req.method === "POST") {
       const action = getAction(req);
       const pin = getPin(req);
+      const actor = actorForPin(pin);
 
       if (!action) {
         return res.status(400).json({ ok: false, error: "Missing action" });
@@ -201,7 +222,7 @@ export default async function handler(
             });
           }
 
-          const { status, json } = await scriptCycleSet(month);
+          const { status, json } = await scriptCycleSet(month, actor);
           return res.status(status).json(json);
         }
 
@@ -214,7 +235,7 @@ export default async function handler(
               : monthKey();
 
           const next = nextMonth(current);
-          const { status, json } = await scriptCycleSet(next);
+          const { status, json } = await scriptCycleSet(next, actor);
 
           // If Apps Script failed, don't pretend success
           if (!json?.ok || status >= 400) {
@@ -238,13 +259,23 @@ export default async function handler(
       }
 
       // -------- pass-through write to Apps Script --------
-      // Important: we forward the body exactly as-is. Your room page already sends:
-      // { action: "save" | "update" | "delete", room, dien, nuoc, note, target }
+      // IMPORTANT: attach actor name (for logs) before forwarding
+      const forwardedBody: Record<string, any> = { ...(req.body || {}) };
+
+      // If the client mistakenly sends pin in body, strip it out so it never hits Sheets
+      if ("pin" in forwardedBody) delete forwardedBody.pin;
+
+      // Add audit fields (Apps Script can pick whichever it uses)
+      if (actor) {
+        forwardedBody.actor = actor;
+        forwardedBody.by = actor;
+      }
+
       const url = buildScriptUrl({});
       const { status, json } = await fetchJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body),
+        body: JSON.stringify(forwardedBody),
       });
 
       return res.status(status).json(json);

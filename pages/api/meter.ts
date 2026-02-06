@@ -6,6 +6,9 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
+// Admin actor list (names from VTPT_PINS): "Masie,Admin"
+const VTPT_ADMINS = process.env.VTPT_ADMINS || "Masie";
+
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string };
 
@@ -44,6 +47,18 @@ function parsePins(pinsRaw: string): Record<string, string> {
   }
 
   return map;
+}
+
+function parseCsv(raw: string) {
+  return (raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function isAdminActor(actor: string) {
+  const admins = new Set(parseCsv(VTPT_ADMINS));
+  return admins.has(actor);
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
@@ -206,11 +221,11 @@ export default async function handler(
       // POST approve / rollback / set (local-only)
       // =========================
       if (qAction === "approve") {
-        // Only Masie can control cycle
-        if (actor !== "Masie") {
+        // Only admins can control cycle (names must match VTPT_PINS mapping)
+        if (!isAdminActor(actor)) {
           return res.status(403).json({
             ok: false,
-            error: "Access denied. Only Masie can approve the month.",
+            error: `Access denied. Only admins can approve the month. (You are: ${actor})`,
           });
         }
 

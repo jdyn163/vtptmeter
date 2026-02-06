@@ -14,6 +14,9 @@ type Reading = {
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
+const CYCLE_KEY = "vtpt_cycle_month";
+const TZ = "Asia/Ho_Chi_Minh";
+
 function latestKey(house: string) {
   return `vtpt_houseLatest_${house}`;
 }
@@ -40,26 +43,55 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function monthKeyFromParts(y: number, m: number) {
+  return `${y}-${pad2(m)}`;
+}
+
+function isMonthKey(s: string) {
+  return /^\d{4}-\d{2}$/.test((s || "").trim());
+}
+
 /* ===== monthly status helpers (approval-driven cycle) ===== */
 
-function monthKey(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+function monthKeyVN(date = new Date()) {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+    });
+    const parts = fmt.formatToParts(date);
+    const y = Number(parts.find((p) => p.type === "year")?.value || "");
+    const m = Number(parts.find((p) => p.type === "month")?.value || "");
+    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
+      return monthKeyFromParts(y, m);
+    }
+  } catch {
+    // fall through
+  }
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
-function monthKeyFromDateString(dateStr: string) {
+function monthKeyFromDateStringVN(dateStr: string) {
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return "unknown";
-  return monthKey(d);
+  return monthKeyVN(d);
 }
 
-function currentMonthKey() {
-  return monthKey(new Date());
+function currentMonthKeyVN() {
+  return monthKeyVN(new Date());
 }
 
 function readCycleKeyFromStorage(): string | null {
+  if (typeof window === "undefined") return null;
   try {
-    const raw = (localStorage.getItem("vtpt_cycle_month") || "").trim();
-    return raw.length ? raw : null;
+    const raw = (localStorage.getItem(CYCLE_KEY) || "").trim();
+    if (!raw.length) return null;
+    return isMonthKey(raw) ? raw : null;
   } catch {
     return null;
   }
@@ -83,16 +115,16 @@ function computeEffectiveCycleKey(latestMap: Record<string, Reading>) {
   }
 
   if (newestISO) {
-    const mk = monthKeyFromDateString(newestISO);
+    const mk = monthKeyFromDateStringVN(newestISO);
     if (mk && mk !== "unknown") return mk;
   }
 
-  return currentMonthKey();
+  return currentMonthKeyVN();
 }
 
 function isLoggedInCycleMonth(reading: Reading | undefined, cycleKey: string) {
   if (!reading?.date) return false;
-  const mk = monthKeyFromDateString(reading.date);
+  const mk = monthKeyFromDateStringVN(reading.date);
   if (!mk || mk === "unknown") return false;
   return mk === cycleKey;
 }
@@ -119,6 +151,7 @@ export default function HousePage() {
   const router = useRouter();
   const house = (router.query.house as string) || "";
 
+  const [mounted, setMounted] = useState(false);
   const [rooms, setRooms] = useState<string[]>([]);
   const [latestMap, setLatestMap] = useState<Record<string, Reading>>({});
   const [loading, setLoading] = useState(true);
@@ -129,8 +162,12 @@ export default function HousePage() {
 
   const [status, setStatus] = useState<string>("");
 
-  // NEW: approval-driven cycle month key (global)
+  // approval-driven cycle month key (global)
   const [cycleKey, setCycleKey] = useState<string>("");
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (!house) return;
@@ -140,7 +177,7 @@ export default function HousePage() {
     const list = all[house] || [];
     setRooms(list);
 
-    // preload cycle key
+    // preload cycle key (client-only)
     setCycleKey(readCycleKeyFromStorage() || "");
 
     // 2) load cached latest
@@ -235,10 +272,11 @@ export default function HousePage() {
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
 
   const effectiveCycleKey = useMemo(() => {
+    if (!mounted) return "…";
     const computed = cycleKey?.trim();
-    if (computed) return computed;
+    if (computed && isMonthKey(computed)) return computed;
     return computeEffectiveCycleKey(latestMap);
-  }, [cycleKey, latestMap]);
+  }, [mounted, cycleKey, latestMap]);
 
   return (
     <main
@@ -277,20 +315,14 @@ export default function HousePage() {
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
-          const loggedInCycle = isLoggedInCycleMonth(latest, effectiveCycleKey);
+          const loggedInCycle =
+            mounted && effectiveCycleKey !== "…"
+              ? isLoggedInCycleMonth(latest, effectiveCycleKey)
+              : false;
 
-          // Your icon rules (now cycle-aware):
-          // - no log -> no icon
-          // - logged -> check
-          // - have note -> warning
-          // - logged + note -> warning (no check)
-          // - note contains "resolved" -> check
           const showAnyIcon = loggedInCycle;
-          const noteExists = loggedInCycle && hasAnyNote(latest);
           const unresolvedNote = loggedInCycle && hasUnresolvedNote(latest);
-          const resolvedNote = loggedInCycle && noteExists && !unresolvedNote;
 
-          // Pick ONE icon only
           const iconSrc = !showAnyIcon
             ? null
             : unresolvedNote
@@ -303,7 +335,6 @@ export default function HousePage() {
               ? "Has note"
               : "Logged";
 
-          // If not logged in cycle month, show empty meters on house list
           const dienDisplay = loggedInCycle
             ? displayMeter(latest?.dien)
             : "---";

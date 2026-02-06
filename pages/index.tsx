@@ -3,8 +3,36 @@ import { useEffect, useMemo, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../lib/rooms";
 import BottomSheet from "../components/BottomSheet";
 
-function monthKey(d: Date) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+const CYCLE_KEY = "vtpt_cycle_month";
+const TZ = "Asia/Ho_Chi_Minh";
+
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function monthKeyFromParts(y: number, m: number) {
+  return `${y}-${pad2(m)}`;
+}
+
+// timezone-stable month key for Vietnam
+function monthKeyVN(date = new Date()) {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+    });
+    const parts = fmt.formatToParts(date);
+    const y = Number(parts.find((p) => p.type === "year")?.value || "");
+    const m = Number(parts.find((p) => p.type === "month")?.value || "");
+    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
+      return monthKeyFromParts(y, m);
+    }
+  } catch {
+    // fall through
+  }
+  // fallback (device local)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
 function isMonthKey(s: string) {
@@ -14,7 +42,7 @@ function isMonthKey(s: string) {
 function readCycleKeySafe(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = (localStorage.getItem("vtpt_cycle_month") || "").trim();
+    const raw = (localStorage.getItem(CYCLE_KEY) || "").trim();
     return raw.length ? raw : null;
   } catch {
     return null;
@@ -24,10 +52,19 @@ function readCycleKeySafe(): string | null {
 function writeCycleKeySafe(key: string) {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem("vtpt_cycle_month", key);
+    localStorage.setItem(CYCLE_KEY, key);
   } catch {
     // ignore
   }
+}
+
+function getCycleMonthKey(): string {
+  // Single source of truth:
+  // 1) stored cycle if valid
+  // 2) otherwise VN month key
+  const stored = readCycleKeySafe();
+  if (stored && isMonthKey(stored)) return stored;
+  return monthKeyVN(new Date());
 }
 
 // numeric-only helpers
@@ -53,15 +90,13 @@ export default function Home() {
     const keys = Object.keys(data).sort();
     setHouses(keys);
 
-    const c = readCycleKeySafe() || monthKey(new Date());
-    setCycle(c);
+    setCycle(getCycleMonthKey());
   }, []);
 
   // whenever sheet opens, refresh cycle + clear inputs
   useEffect(() => {
     if (!open) return;
-    const c = readCycleKeySafe() || monthKey(new Date());
-    setCycle(c);
+    setCycle(getCycleMonthKey());
     setPin("");
     setApproveMsg(null);
   }, [open]);
@@ -75,7 +110,7 @@ export default function Home() {
       return;
     }
 
-    const currentCycleKey = readCycleKeySafe() || monthKey(new Date());
+    const currentCycleKey = getCycleMonthKey();
 
     setApproving(true);
     setApproveMsg(null);
@@ -134,7 +169,7 @@ export default function Home() {
     }
   }
 
-  const cycleLabel = mounted ? cycle || monthKey(new Date()) : "…";
+  const cycleLabel = mounted ? cycle || getCycleMonthKey() : "…";
 
   return (
     <main

@@ -4,8 +4,10 @@ import type { NextApiRequest, NextApiResponse } from "next";
 const SCRIPT_URL = process.env.SCRIPT_URL;
 const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN;
 
-// Pins format: "0511,2222,3333"
-// ONLY numbers matter now
+// User pins format (same as /api/auth): "1111:Masie,2222:Brother,3333:Thuan"
+const VTPT_PINS_RAW = process.env.VTPT_PINS || "";
+
+// Admin pins format: "0511,2222,3333" (numbers only)
 const VTPT_ADMIN_PINS = (process.env.VTPT_ADMIN_PINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -20,11 +22,57 @@ type ApiOk<T = any> = {
 };
 type ApiErr = { ok: false; error: string };
 
+function parsePins(pinsRaw: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  const items = pinsRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const item of items) {
+    const idx = item.indexOf(":");
+    if (idx === -1) continue;
+
+    const pin = item.slice(0, idx).trim();
+    const name = item.slice(idx + 1).trim();
+    if (!pin || !name) continue;
+
+    map[pin] = name;
+  }
+
+  return map;
+}
+
 function getPin(req: NextApiRequest): string {
   const headerPin = req.headers["x-vtpt-pin"];
   if (typeof headerPin === "string") return headerPin.trim();
   if (req.body && typeof req.body.pin === "string") return req.body.pin.trim();
   return "";
+}
+
+function getAction(req: NextApiRequest): string {
+  // Support both:
+  // - /api/meter?action=approve (query)
+  // - POST body: { action: "save" } (room page)
+  const q = String(req.query.action || "").trim();
+  const b =
+    req.body && typeof req.body.action === "string"
+      ? req.body.action.trim()
+      : "";
+  return q || b;
+}
+
+function isAdminPin(pin: string) {
+  return !!pin && VTPT_ADMIN_PINS.includes(pin);
+}
+
+function isUserPin(pin: string) {
+  if (!pin) return false;
+  // admin pin is also allowed to do normal user actions
+  if (isAdminPin(pin)) return true;
+
+  const map = parsePins(VTPT_PINS_RAW);
+  return !!map[pin];
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
@@ -128,54 +176,70 @@ export default async function handler(
        POST
     ======================= */
     if (req.method === "POST") {
-      const action = String(req.query.action || "").trim();
+      const action = getAction(req);
       const pin = getPin(req);
 
-      if (!VTPT_ADMIN_PINS.includes(pin)) {
+      if (!action) {
+        return res.status(400).json({ ok: false, error: "Missing action" });
+      }
+
+      // Admin-only actions
+      if (action === "approve" || action === "cycleSet") {
+        if (!isAdminPin(pin)) {
+          return res
+            .status(401)
+            .json({ ok: false, error: "Unauthorized (admin PIN required)" });
+        }
+
+        // -------- cycleSet --------
+        if (action === "cycleSet") {
+          const month = String(req.body?.month || "").trim();
+          if (!isMonthKey(month)) {
+            return res.status(400).json({
+              ok: false,
+              error: "Invalid month. Expected YYYY-MM.",
+            });
+          }
+
+          const { status, json } = await scriptCycleSet(month);
+          return res.status(status).json(json);
+        }
+
+        // -------- approve (next month) --------
+        if (action === "approve") {
+          const current =
+            typeof req.body?.currentCycleKey === "string" &&
+            isMonthKey(req.body.currentCycleKey)
+              ? req.body.currentCycleKey
+              : monthKey();
+
+          const next = nextMonth(current);
+          const { status, json } = await scriptCycleSet(next);
+
+          // If Apps Script failed, don't pretend success
+          if (!json?.ok || status >= 400) {
+            return res.status(status).json(json);
+          }
+
+          return res.status(200).json({
+            ok: true,
+            nextMonthKey: next,
+            message: `Approved ✅ Cycle moved to ${next}`,
+            backend: json,
+          });
+        }
+      }
+
+      // Everything else: any valid user PIN (admin pin also allowed)
+      if (!isUserPin(pin)) {
         return res
           .status(401)
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
 
-      // -------- cycleSet --------
-      if (action === "cycleSet") {
-        const month = String(req.body?.month || "").trim();
-        if (!isMonthKey(month)) {
-          return res.status(400).json({
-            ok: false,
-            error: "Invalid month. Expected YYYY-MM.",
-          });
-        }
-
-        const { status, json } = await scriptCycleSet(month);
-        return res.status(status).json(json);
-      }
-
-      // -------- approve (next month) --------
-      if (action === "approve") {
-        const current =
-          typeof req.body?.currentCycleKey === "string" &&
-          isMonthKey(req.body.currentCycleKey)
-            ? req.body.currentCycleKey
-            : monthKey();
-
-        const next = nextMonth(current);
-        const { status, json } = await scriptCycleSet(next);
-
-        // If Apps Script failed, don't pretend success
-        if (!json?.ok || status >= 400) {
-          return res.status(status).json(json);
-        }
-
-        return res.status(200).json({
-          ok: true,
-          nextMonthKey: next,
-          message: `Approved ✅ Cycle moved to ${next}`,
-          backend: json,
-        });
-      }
-
-      // -------- fallback write --------
+      // -------- pass-through write to Apps Script --------
+      // Important: we forward the body exactly as-is. Your room page already sends:
+      // { action: "save" | "update" | "delete", room, dien, nuoc, note, target }
       const url = buildScriptUrl({});
       const { status, json } = await fetchJson(url, {
         method: "POST",

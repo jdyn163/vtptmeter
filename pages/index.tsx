@@ -84,7 +84,11 @@ export default function Home() {
   // bottom sheet state
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState("");
-  const [cycle, setCycle] = useState<string>(""); // UI-only label
+
+  // Fix A: do not show cycle until backend answered at least once
+  const [cycle, setCycle] = useState<string>(""); // last known backend cycle
+  const [cycleLoaded, setCycleLoaded] = useState(false);
+
   const [mounted, setMounted] = useState(false);
 
   const canOpen = useMemo(() => !approving, [approving]);
@@ -93,10 +97,14 @@ export default function Home() {
     const backend = await fetchBackendCycleKeySafe();
     if (backend) {
       setCycle(backend);
+      setCycleLoaded(true);
       return;
     }
-    // offline fallback only (do NOT persist locally)
-    setCycle(monthKeyVN(new Date()));
+
+    // Fix A rule:
+    // - If never loaded before: keep it in "…" state (do NOT fallback to VN month for display).
+    // - If loaded before: keep showing the last known cycle (no flip).
+    // (No state change needed in either case.)
   }
 
   useEffect(() => {
@@ -124,11 +132,18 @@ export default function Home() {
       return;
     }
 
-    // Use current UI cycle if valid; otherwise fetch backend; otherwise fallback VN month
+    // Fix A: do not use VN month for display, but for approve we still need a safe key to send.
+    // Priority:
+    // 1) if cycleLoaded and cycle valid -> use cycle
+    // 2) else fetch backend right now (best effort)
+    // 3) else fallback VN month (only to allow the API call to proceed)
+    const fetched = await fetchBackendCycleKeySafe();
     const currentCycleKey =
-      cycle && isMonthKey(cycle)
+      cycleLoaded && cycle && isMonthKey(cycle)
         ? cycle
-        : (await fetchBackendCycleKeySafe()) || monthKeyVN(new Date());
+        : fetched && isMonthKey(fetched)
+          ? fetched
+          : monthKeyVN(new Date());
 
     setApproving(true);
     setApproveMsg(null);
@@ -178,8 +193,8 @@ export default function Home() {
     }
   }
 
-  // Keep SSR stable
-  const cycleLabel = mounted ? cycle || "…" : "…";
+  // Keep SSR stable, and Fix A: only render cycle after cycleLoaded === true
+  const cycleLabel = mounted ? (cycleLoaded ? cycle : "…") : "…";
 
   return (
     <main

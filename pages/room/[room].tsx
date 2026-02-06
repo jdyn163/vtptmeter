@@ -337,8 +337,9 @@ export default function RoomPage() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
-  // NEW: global cycle month key (shared)
-  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null);
+  // Fix A: do not show cycle until backend answered at least once
+  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null); // last known backend cycle
+  const [cycleLoaded, setCycleLoaded] = useState(false);
 
   const TTL_MS = 2 * 60 * 1000;
 
@@ -346,9 +347,14 @@ export default function RoomPage() {
     const backend = await fetchBackendCycleKeySafe();
     if (backend) {
       setCycleMonthKey(backend);
+      setCycleLoaded(true);
       return;
     }
-    setCycleMonthKey(currentMonthKeyVN());
+
+    // Fix A rule:
+    // - If never loaded: keep "…" (no VN fallback for display).
+    // - If loaded once: keep last known value (no flip).
+    // (No state change needed.)
   }
 
   function isInCycleMonth(dateStr?: string) {
@@ -554,12 +560,14 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
+  // SSR-safe label + Fix A: only render cycle after cycleLoaded === true
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
+    if (!cycleLoaded) return "…";
     const k = String(cycleMonthKey || "").trim();
     if (k && isMonthKey(k)) return k;
-    return currentMonthKeyVN();
-  }, [mounted, cycleMonthKey]);
+    return "…";
+  }, [mounted, cycleLoaded, cycleMonthKey]);
 
   const inCycle = mounted ? !!(latest && isInCycleMonth(latest.date)) : false;
   const buttonLabel = latest ? "Edit" : "Add";
@@ -725,7 +733,7 @@ export default function RoomPage() {
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
 
-      // if we just wrote a reading for the cycle month, refresh cycle too (cheap + keeps UI honest)
+      // keep cycle in sync (best effort)
       await syncCycle();
 
       setSaving(false);
@@ -844,7 +852,8 @@ export default function RoomPage() {
   }, [history, tab]);
 
   // "This month reading" is approval-driven (cycle month), not calendar-driven.
-  const showCycleNumbers = inCycle;
+  // Fix A: don't show cycle numbers until cycleLoaded === true (prevents flip).
+  const showCycleNumbers = cycleLoaded && inCycle;
 
   const latestDien =
     showCycleNumbers &&

@@ -157,17 +157,22 @@ export default function HousePage() {
 
   const [status, setStatus] = useState<string>("");
 
-  // IMPORTANT: cycleKey is now from backend (shared across devices)
-  const [cycleKey, setCycleKey] = useState<string>("");
+  // Fix A: do not show cycle until backend answered at least once
+  const [cycleKey, setCycleKey] = useState<string>(""); // last known backend cycle
+  const [cycleLoaded, setCycleLoaded] = useState(false);
 
   async function syncCycle() {
     const backend = await fetchBackendCycleKeySafe();
     if (backend) {
       setCycleKey(backend);
+      setCycleLoaded(true);
       return;
     }
-    // Offline fallback only (do NOT derive from newest readings, that caused drift)
-    setCycleKey(currentMonthKeyVN());
+
+    // Fix A rule:
+    // - If never loaded before: keep it in "…" state (do NOT fallback for display).
+    // - If loaded before: keep last known cycleKey (no flip).
+    // (No state change needed.)
   }
 
   useEffect(() => {
@@ -272,13 +277,14 @@ export default function HousePage() {
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
 
-  // SSR-safe label
+  // SSR-safe label + Fix A: only render cycle after cycleLoaded === true
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
+    if (!cycleLoaded) return "…";
     const k = (cycleKey || "").trim();
     if (k && isMonthKey(k)) return k;
-    return currentMonthKeyVN();
-  }, [mounted, cycleKey]);
+    return "…";
+  }, [mounted, cycleLoaded, cycleKey]);
 
   return (
     <main

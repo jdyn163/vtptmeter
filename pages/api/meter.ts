@@ -1,3 +1,4 @@
+// pages/api/meter.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
@@ -6,8 +7,8 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
-// Admin actor list (names from VTPT_PINS): "Masie,Admin"
-const VTPT_ADMINS = process.env.VTPT_ADMINS || "Masie";
+// Optional: if your env uses a different display name than "Masie"
+const VTPT_ADMIN_NAME = (process.env.VTPT_ADMIN_NAME || "Masie").trim();
 
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string };
@@ -47,18 +48,6 @@ function parsePins(pinsRaw: string): Record<string, string> {
   }
 
   return map;
-}
-
-function parseCsv(raw: string) {
-  return (raw || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function isAdminActor(actor: string) {
-  const admins = new Set(parseCsv(VTPT_ADMINS));
-  return admins.has(actor);
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
@@ -133,6 +122,18 @@ function prevMonthKeyFrom(key: string) {
   d.setMonth(d.getMonth() - 1);
   return monthKey(d);
 }
+
+async function scriptCycleSet(month: string, actor: string) {
+  // We send this like a normal write payload (Apps Script can read JSON body.action)
+  const url = buildScriptUrl({});
+  const payload = { action: "cycleSet", month, actor };
+  const { status, json } = await fetchJson(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { status, json };
+}
 // =========================
 
 export default async function handler(
@@ -161,6 +162,13 @@ export default async function handler(
 
       if (!action) {
         return res.status(400).json({ ok: false, error: "Missing action" });
+      }
+
+      // NEW: global cycle read (shared across devices)
+      if (action === "cycleGet") {
+        const url = buildScriptUrl({ action: "cycleGet" });
+        const { status, json } = await fetchJson(url);
+        return res.status(status).json(json);
       }
 
       const houseActions = new Set(["houseLatest", "houseHistory"]);
@@ -218,14 +226,14 @@ export default async function handler(
       }
 
       // =========================
-      // POST approve / rollback / set (local-only)
+      // POST approve / rollback / set (NOW: persists globally via Apps Script)
       // =========================
       if (qAction === "approve") {
-        // Only admins can control cycle (names must match VTPT_PINS mapping)
-        if (!isAdminActor(actor)) {
+        // Only admin can control cycle
+        if (actor !== VTPT_ADMIN_NAME) {
           return res.status(403).json({
             ok: false,
-            error: `Access denied. Only admins can approve the month. (You are: ${actor})`,
+            error: `Access denied. Only ${VTPT_ADMIN_NAME} can approve the month.`,
           });
         }
 
@@ -242,16 +250,10 @@ export default async function handler(
           ? currentCycleKey
           : monthKey(new Date());
 
-        if (mode === "rollback") {
-          const prev = prevMonthKeyFrom(base);
-          return res.status(200).json({
-            ok: true,
-            nextMonthKey: prev,
-            message: `Rollback ✅ Cycle moved to ${prev}.`,
-          });
-        }
+        let nextKey = base;
 
-        if (mode === "set") {
+        if (mode === "rollback") nextKey = prevMonthKeyFrom(base);
+        else if (mode === "set") {
           const target =
             typeof body.targetMonthKey === "string"
               ? body.targetMonthKey.trim()
@@ -262,20 +264,37 @@ export default async function handler(
               error: "Invalid targetMonthKey. Expected YYYY-MM (e.g. 2026-02).",
             });
           }
-          return res.status(200).json({
-            ok: true,
-            nextMonthKey: target,
-            message: `Set ✅ Cycle moved to ${target}.`,
-          });
+          nextKey = target;
+        } else {
+          nextKey = nextMonthKeyFrom(base);
         }
 
-        // default: approve -> next month
-        const next = nextMonthKeyFrom(base);
-        return res.status(200).json({
-          ok: true,
-          nextMonthKey: next,
-          message: `Approved ✅ Cycle moved to ${next}.`,
-        });
+        // Persist to shared backend (Apps Script)
+        try {
+          const { status, json } = await scriptCycleSet(nextKey, actor);
+          // If script returns a friendly message, pass it along
+          if (!json?.ok && status >= 400) {
+            return res.status(status).json(json);
+          }
+          return res.status(200).json({
+            ok: true,
+            nextMonthKey: nextKey,
+            message:
+              json?.message ||
+              (mode === "rollback"
+                ? `Rollback ✅ Cycle moved to ${nextKey}.`
+                : mode === "set"
+                  ? `Set ✅ Cycle moved to ${nextKey}.`
+                  : `Approved ✅ Cycle moved to ${nextKey}.`),
+          });
+        } catch (e: any) {
+          // If backend cycle save fails, do NOT lie about success
+          return res.status(502).json({
+            ok: false,
+            error:
+              e?.message || "Failed to persist cycle to backend (Apps Script).",
+          });
+        }
       }
 
       // =========================

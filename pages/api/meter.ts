@@ -2,66 +2,33 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
-const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
+const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN;
 
-// Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
-const VTPT_PINS = process.env.VTPT_PINS;
+// Pins format: "0511,2222,3333"
+// ONLY numbers matter now
+const VTPT_ADMIN_PINS = (process.env.VTPT_ADMIN_PINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-// Optional: if your env uses a different display name than "Masie"
-const VTPT_ADMIN_NAME = (process.env.VTPT_ADMIN_NAME || "Masie").trim();
-
-type ApiOk<T> = { ok: true; data: T };
+type ApiOk<T> = { ok: true; data?: T; message?: string };
 type ApiErr = { ok: false; error: string };
 
-function getHeaderPin(req: NextApiRequest): string {
-  const raw = req.headers["x-vtpt-pin"];
-  const pin = Array.isArray(raw) ? raw[0] : raw;
-  return (pin || "").trim();
-}
-
-// allow pin from body too (for approve sheet)
-function getAnyPin(req: NextApiRequest): string {
-  const headerPin = getHeaderPin(req);
-  if (headerPin) return headerPin;
-
-  const bodyPin =
-    req.body && typeof req.body.pin === "string" ? req.body.pin.trim() : "";
-  return bodyPin;
-}
-
-function parsePins(pinsRaw: string): Record<string, string> {
-  const map: Record<string, string> = {};
-  const items = pinsRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  for (const item of items) {
-    const idx = item.indexOf(":");
-    if (idx === -1) continue;
-
-    const pin = item.slice(0, idx).trim();
-    const name = item.slice(idx + 1).trim();
-    if (!pin || !name) continue;
-
-    map[pin] = name;
-  }
-
-  return map;
+function getPin(req: NextApiRequest): string {
+  const headerPin = req.headers["x-vtpt-pin"];
+  if (typeof headerPin === "string") return headerPin.trim();
+  if (req.body && typeof req.body.pin === "string") return req.body.pin.trim();
+  return "";
 }
 
 async function fetchJson(url: string, init?: RequestInit) {
   const res = await fetch(url, init);
   const text = await res.text();
-
-  let json: any;
   try {
-    json = JSON.parse(text);
+    return { status: res.status, json: JSON.parse(text) };
   } catch {
     throw new Error(text || `Upstream error ${res.status}`);
   }
-
-  return { status: res.status, json };
 }
 
 function buildScriptUrl(params: Record<string, string>) {
@@ -71,308 +38,119 @@ function buildScriptUrl(params: Record<string, string>) {
   const url = new URL(SCRIPT_URL);
   url.searchParams.set("token", SCRIPT_TOKEN);
 
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && String(v).length) {
-      url.searchParams.set(k, String(v));
-    }
-  }
+  Object.entries(params).forEach(([k, v]) => {
+    if (v) url.searchParams.set(k, v);
+  });
 
   return url.toString();
 }
 
-function hasFiniteNumber(x: any) {
-  return x !== null && x !== undefined && Number.isFinite(Number(x));
+function isMonthKey(s: string) {
+  return /^\d{4}-\d{2}$/.test(s);
 }
 
-// ===== cycle helpers =====
-function monthKey(d: Date) {
+function monthKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test((s || "").trim());
-}
-
-function nextMonthKeyFrom(key: string) {
-  const m = /^(\d{4})-(\d{2})$/.exec((key || "").trim());
-  if (!m) return monthKey(new Date());
-
-  const y = Number(m[1]);
-  const mo = Number(m[2]); // 1..12
-  if (!Number.isFinite(y) || !Number.isFinite(mo) || mo < 1 || mo > 12) {
-    return monthKey(new Date());
-  }
-
-  const d = new Date(y, mo - 1, 1);
+function nextMonth(key: string) {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1, 1);
   d.setMonth(d.getMonth() + 1);
   return monthKey(d);
 }
 
-function prevMonthKeyFrom(key: string) {
-  const m = /^(\d{4})-(\d{2})$/.exec((key || "").trim());
-  if (!m) return monthKey(new Date());
-
-  const y = Number(m[1]);
-  const mo = Number(m[2]); // 1..12
-  if (!Number.isFinite(y) || !Number.isFinite(mo) || mo < 1 || mo > 12) {
-    return monthKey(new Date());
-  }
-
-  const d = new Date(y, mo - 1, 1);
-  d.setMonth(d.getMonth() - 1);
-  return monthKey(d);
-}
-
-async function scriptCycleSet(month: string, actor: string) {
-  // We send this like a normal write payload (Apps Script can read JSON body.action)
+async function scriptCycleSet(month: string) {
   const url = buildScriptUrl({});
-  const payload = { action: "cycleSet", month, actor };
-  const { status, json } = await fetchJson(url, {
+  const payload = { action: "cycleSet", month };
+
+  return fetchJson(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return { status, json };
 }
-// =========================
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ApiOk<any> | ApiErr | any>,
+  res: NextApiResponse<ApiOk<any> | ApiErr>,
 ) {
   try {
-    if (!SCRIPT_URL) {
-      return res.status(500).json({ ok: false, error: "Missing SCRIPT_URL" });
-    }
-    if (!SCRIPT_TOKEN) {
-      return res.status(500).json({ ok: false, error: "Missing SCRIPT_TOKEN" });
+    if (!SCRIPT_URL || !SCRIPT_TOKEN) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "Missing SCRIPT_URL or SCRIPT_TOKEN" });
     }
 
-    // =========================
-    // GET (READ)
-    // =========================
+    /* =======================
+       GET
+    ======================= */
     if (req.method === "GET") {
       const action = String(req.query.action || "").trim();
-      const room = String(req.query.room || "").trim();
-      const house = String(req.query.house || "").trim();
-      const limit = req.query.limit ? String(req.query.limit) : "";
-      const limitPerRoom = req.query.limitPerRoom
-        ? String(req.query.limitPerRoom)
-        : "";
 
-      if (!action) {
-        return res.status(400).json({ ok: false, error: "Missing action" });
-      }
-
-      // NEW: global cycle read (shared across devices)
       if (action === "cycleGet") {
         const url = buildScriptUrl({ action: "cycleGet" });
         const { status, json } = await fetchJson(url);
         return res.status(status).json(json);
       }
 
-      const houseActions = new Set(["houseLatest", "houseHistory"]);
-      const roomActions = new Set(["latest", "history", "log"]);
-
-      if (houseActions.has(action) && !house) {
-        return res.status(400).json({ ok: false, error: "Missing house" });
-      }
-      if (roomActions.has(action) && !room) {
-        return res.status(400).json({ ok: false, error: "Missing room" });
-      }
-
-      const url = buildScriptUrl({
-        action,
-        room,
-        house,
-        limit,
-        limitPerRoom,
-      });
-
+      const url = buildScriptUrl(req.query as Record<string, string>);
       const { status, json } = await fetchJson(url);
       return res.status(status).json(json);
     }
 
-    // =========================
-    // POST
-    // =========================
+    /* =======================
+       POST
+    ======================= */
     if (req.method === "POST") {
-      const qAction = String(req.query.action || "").trim();
+      const action = String(req.query.action || "").trim();
+      const pin = getPin(req);
 
-      if (!VTPT_PINS) {
-        return res.status(500).json({
-          ok: false,
-          error:
-            "Server not configured: VTPT_PINS is missing. Writes are disabled.",
-        });
-      }
-
-      const pins = parsePins(VTPT_PINS);
-      if (!Object.keys(pins).length) {
-        return res.status(500).json({
-          ok: false,
-          error:
-            "Server not configured: VTPT_PINS is empty/invalid (expected '1111:Masie,2222:Brother').",
-        });
-      }
-
-      const pin = getAnyPin(req);
-      const actor = pin ? pins[pin] : undefined;
-
-      if (!actor) {
+      if (!VTPT_ADMIN_PINS.includes(pin)) {
         return res
           .status(401)
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
 
-      // =========================
-      // POST approve / rollback / set (NOW: persists globally via Apps Script)
-      // =========================
-      if (qAction === "approve") {
-        // Only admin can control cycle
-        if (actor !== VTPT_ADMIN_NAME) {
-          return res.status(403).json({
+      // -------- cycleSet --------
+      if (action === "cycleSet") {
+        const month = String(req.body?.month || "").trim();
+        if (!isMonthKey(month)) {
+          return res.status(400).json({
             ok: false,
-            error: `Access denied. Only ${VTPT_ADMIN_NAME} can approve the month.`,
+            error: "Invalid month. Expected YYYY-MM.",
           });
         }
 
-        const body = req.body || {};
-        const mode =
-          typeof body.mode === "string" ? body.mode.trim() : "approve";
-
-        const currentCycleKey =
-          typeof body.currentCycleKey === "string"
-            ? body.currentCycleKey.trim()
-            : "";
-
-        const base = isMonthKey(currentCycleKey)
-          ? currentCycleKey
-          : monthKey(new Date());
-
-        let nextKey = base;
-
-        if (mode === "rollback") nextKey = prevMonthKeyFrom(base);
-        else if (mode === "set") {
-          const target =
-            typeof body.targetMonthKey === "string"
-              ? body.targetMonthKey.trim()
-              : "";
-          if (!isMonthKey(target)) {
-            return res.status(400).json({
-              ok: false,
-              error: "Invalid targetMonthKey. Expected YYYY-MM (e.g. 2026-02).",
-            });
-          }
-          nextKey = target;
-        } else {
-          nextKey = nextMonthKeyFrom(base);
-        }
-
-        // Persist to shared backend (Apps Script)
-        try {
-          const { status, json } = await scriptCycleSet(nextKey, actor);
-          // If script returns a friendly message, pass it along
-          if (!json?.ok && status >= 400) {
-            return res.status(status).json(json);
-          }
-          return res.status(200).json({
-            ok: true,
-            nextMonthKey: nextKey,
-            message:
-              json?.message ||
-              (mode === "rollback"
-                ? `Rollback ✅ Cycle moved to ${nextKey}.`
-                : mode === "set"
-                  ? `Set ✅ Cycle moved to ${nextKey}.`
-                  : `Approved ✅ Cycle moved to ${nextKey}.`),
-          });
-        } catch (e: any) {
-          // If backend cycle save fails, do NOT lie about success
-          return res.status(502).json({
-            ok: false,
-            error:
-              e?.message || "Failed to persist cycle to backend (Apps Script).",
-          });
-        }
+        const { status, json } = await scriptCycleSet(month);
+        return res.status(status).json(json);
       }
 
-      // =========================
-      // POST (WRITE): save / update / delete
-      // =========================
-      const body = req.body || {};
-      const actionRaw = String(body.action || "save").trim();
-      const action =
-        actionRaw === "update" || actionRaw === "delete" ? actionRaw : "save";
+      // -------- approve (next month) --------
+      if (action === "approve") {
+        const current =
+          typeof req.body?.currentCycleKey === "string" &&
+          isMonthKey(req.body.currentCycleKey)
+            ? req.body.currentCycleKey
+            : monthKey();
 
-      const roomStr = String(body.room || "").trim();
-      if (!roomStr)
-        return res.status(400).json({ ok: false, error: "Missing room" });
+        const next = nextMonth(current);
+        const { status, json } = await scriptCycleSet(next);
 
-      const target = body.target || undefined;
-      const targetId =
-        target && target.id !== undefined ? Number(target.id) : undefined;
-      const targetDate =
-        target && target.date !== undefined ? String(target.date).trim() : "";
-
-      if ((action === "update" || action === "delete") && !target) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Missing target for update/delete" });
-      }
-      if ((action === "update" || action === "delete") && !targetDate) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Missing target.date for update/delete" });
-      }
-      if (
-        (action === "update" || action === "delete") &&
-        (targetId === undefined || !Number.isFinite(targetId))
-      ) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing/invalid target.id for update/delete",
+        return res.status(status).json({
+          ok: true,
+          nextMonthKey: next,
+          message: `Approved ✅ Cycle moved to ${next}`,
+          backend: json,
         });
       }
 
-      if (action !== "delete") {
-        const dienProvided = hasFiniteNumber(body.dien);
-        const nuocProvided = hasFiniteNumber(body.nuoc);
-
-        if (!dienProvided && !nuocProvided) {
-          return res.status(400).json({
-            ok: false,
-            error: "Provide at least one of dien or nuoc",
-          });
-        }
-      }
-
-      const noteStr = typeof body.note === "string" ? body.note.trim() : "";
-
+      // -------- fallback write --------
       const url = buildScriptUrl({});
-
-      const payload: any = {
-        action,
-        room: roomStr,
-        actor,
-      };
-
-      if (action === "delete") {
-        payload.target = { id: targetId, date: targetDate };
-      } else {
-        payload.dien = hasFiniteNumber(body.dien) ? Number(body.dien) : null;
-        payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;
-        payload.note = noteStr;
-
-        if (action === "update") {
-          payload.target = { id: targetId, date: targetDate };
-        }
-      }
-
       const { status, json } = await fetchJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(req.body),
       });
 
       return res.status(status).json(json);

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../lib/rooms";
 import BottomSheet from "../components/BottomSheet";
+import { useCycle } from "../lib/useCycle";
 
 const TZ = "Asia/Ho_Chi_Minh";
 
@@ -85,27 +86,12 @@ export default function Home() {
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState("");
 
-  // Fix A: do not show cycle until backend answered at least once
-  const [cycle, setCycle] = useState<string>(""); // last known backend cycle
-  const [cycleLoaded, setCycleLoaded] = useState(false);
-
   const [mounted, setMounted] = useState(false);
 
+  // shared cycle cache + background refresh
+  const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
+
   const canOpen = useMemo(() => !approving, [approving]);
-
-  async function syncCycle() {
-    const backend = await fetchBackendCycleKeySafe();
-    if (backend) {
-      setCycle(backend);
-      setCycleLoaded(true);
-      return;
-    }
-
-    // Fix A rule:
-    // - If never loaded before: keep it in "…" state (do NOT fallback to VN month for display).
-    // - If loaded before: keep showing the last known cycle (no flip).
-    // (No state change needed in either case.)
-  }
 
   useEffect(() => {
     setMounted(true);
@@ -113,17 +99,15 @@ export default function Home() {
     const data: RoomsByHouse = getRoomsByHouse();
     const keys = Object.keys(data).sort();
     setHouses(keys);
-
-    void syncCycle();
   }, []);
 
   // whenever sheet opens, refresh cycle + clear inputs
   useEffect(() => {
     if (!open) return;
-    void syncCycle();
+    void refreshCycle();
     setPin("");
     setApproveMsg(null);
-  }, [open]);
+  }, [open, refreshCycle]);
 
   async function approveNextMonth() {
     const trimmedPin = pin.trim();
@@ -132,14 +116,11 @@ export default function Home() {
       return;
     }
 
-    // Fix A: do not use VN month for display, but for approve we still need a safe key to send.
-    // Priority:
-    // 1) if cycleLoaded and cycle valid -> use cycle
-    // 2) else fetch backend right now (best effort)
-    // 3) else fallback VN month (only to allow the API call to proceed)
+    // We prefer the shared (cached) cycle. If missing, best-effort fetch.
+    // Final fallback VN month is only to allow the API call to proceed.
     const fetched = await fetchBackendCycleKeySafe();
     const currentCycleKey =
-      cycleLoaded && cycle && isMonthKey(cycle)
+      cycle && isMonthKey(cycle)
         ? cycle
         : fetched && isMonthKey(fetched)
           ? fetched
@@ -178,7 +159,7 @@ export default function Home() {
       }
 
       // After approve, ALWAYS re-read backend (single source of truth)
-      await syncCycle();
+      await refreshCycle();
 
       const msg = data?.message || "Approved ✅";
       setApproveMsg(msg);
@@ -193,8 +174,8 @@ export default function Home() {
     }
   }
 
-  // Keep SSR stable, and Fix A: only render cycle after cycleLoaded === true
-  const cycleLabel = mounted ? (cycleLoaded ? cycle : "…") : "…";
+  // Keep SSR stable: show "…" until mounted; after that, show cached cycle if available.
+  const cycleLabel = mounted ? (cycleLoading ? "…" : cycle || "…") : "…";
 
   return (
     <main

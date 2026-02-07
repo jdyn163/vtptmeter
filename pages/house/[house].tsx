@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../../lib/rooms";
+import { useCycle } from "../../lib/useCycle";
 
 type Reading = {
   room: string;
@@ -159,40 +160,6 @@ function cycleKeyFromReadingDate(dateStr: string): string | null {
   return mk;
 }
 
-/* ===== Shared cycle (backend) ===== */
-
-async function fetchBackendCycleKeySafe(): Promise<string | null> {
-  try {
-    const r = await fetch("/api/meter?action=cycleGet", {
-      method: "GET",
-      cache: "no-store",
-      headers: {
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-      },
-    });
-    const j = await r.json();
-
-    const raw =
-      typeof j?.data === "string"
-        ? j.data
-        : typeof j?.cycleMonthKey === "string"
-          ? j.cycleMonthKey
-          : typeof j?.month === "string"
-            ? j.month
-            : typeof j?.monthKey === "string"
-              ? j.monthKey
-              : typeof j?.current === "string"
-                ? j.current
-                : "";
-
-    const key = String(raw || "").trim();
-    return isMonthKey(key) ? key : null;
-  } catch {
-    return null;
-  }
-}
-
 /* ===== monthly status helpers (cycle-driven) ===== */
 
 function isResolvedNote(note?: string) {
@@ -244,23 +211,8 @@ export default function HousePage() {
 
   const [status, setStatus] = useState<string>("");
 
-  // Fix A: do not show cycle until backend answered at least once
-  const [cycleKey, setCycleKey] = useState<string>(""); // last known backend cycle
-  const [cycleLoaded, setCycleLoaded] = useState(false);
-
-  async function syncCycle() {
-    const backend = await fetchBackendCycleKeySafe();
-    if (backend) {
-      setCycleKey(backend);
-      setCycleLoaded(true);
-      return;
-    }
-
-    // Fix A rule:
-    // - If never loaded before: keep it in "…" state (do NOT fallback for display).
-    // - If loaded before: keep last known cycleKey (no flip).
-    // (No state change needed.)
-  }
+  // shared cycle cache + background refresh
+  const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
 
   useEffect(() => {
     setMounted(true);
@@ -307,8 +259,8 @@ export default function HousePage() {
       setStatus("No cache yet");
     }
 
-    // 3) Always sync shared cycle first (single source of truth)
-    void syncCycle();
+    // 3) Sync shared cycle (fast if cached)
+    void refreshCycle();
 
     // 4) fetch fresh in background
     (async () => {
@@ -348,13 +300,13 @@ export default function HousePage() {
         );
 
         // re-sync cycle after network calls too (in case approve happened elsewhere)
-        await syncCycle();
+        await refreshCycle();
 
         setStatus(`Updated (${new Date().toLocaleTimeString()})`);
       } catch {
         setStatus(`Fetch failed (using cache)`);
         // still try to sync cycle (might fail offline)
-        await syncCycle();
+        await refreshCycle();
       } finally {
         setLoading(false);
       }
@@ -364,14 +316,14 @@ export default function HousePage() {
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
 
-  // SSR-safe label + Fix A: only render cycle after cycleLoaded === true
+  // SSR-safe label: show "…" until mounted; after that, show cached cycle if available.
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
-    if (!cycleLoaded) return "…";
-    const k = (cycleKey || "").trim();
+    if (cycleLoading) return "…";
+    const k = (cycle || "").trim();
     if (k && isMonthKey(k)) return k;
     return "…";
-  }, [mounted, cycleLoaded, cycleKey]);
+  }, [mounted, cycleLoading, cycle]);
 
   return (
     <main

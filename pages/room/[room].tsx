@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import BottomSheet from "../../components/BottomSheet";
+import { useCycle } from "../../lib/useCycle";
 
 type Reading = {
   room: string;
@@ -278,40 +279,6 @@ function getReadingValue(row: Reading, tab: "dien" | "nuoc"): number | null {
 }
 // ----------------------------------------------------------------
 
-/* ===== Shared cycle (backend) ===== */
-async function fetchBackendCycleKeySafe(): Promise<string | null> {
-  try {
-    const r = await fetch("/api/meter?action=cycleGet", {
-      method: "GET",
-      cache: "no-store",
-      headers: {
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-      },
-    });
-    const j = await r.json();
-
-    const raw =
-      typeof j?.data === "string"
-        ? j.data
-        : typeof j?.cycleMonthKey === "string"
-          ? j.cycleMonthKey
-          : typeof j?.month === "string"
-            ? j.month
-            : typeof j?.monthKey === "string"
-              ? j.monthKey
-              : typeof j?.current === "string"
-                ? j.current
-                : "";
-
-    const key = String(raw || "").trim();
-    return isMonthKey(key) ? key : null;
-  } catch {
-    return null;
-  }
-}
-/* ================================= */
-
 function Field({
   label,
   value,
@@ -398,25 +365,14 @@ export default function RoomPage() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
-  // Fix A: do not show cycle until backend answered at least once
-  const [cycleMonthKey, setCycleMonthKey] = useState<string | null>(null);
-  const [cycleLoaded, setCycleLoaded] = useState(false);
+  // shared cycle cache + background refresh
+  const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
 
   const TTL_MS = 2 * 60 * 1000;
 
-  async function syncCycle() {
-    const backend = await fetchBackendCycleKeySafe();
-    if (backend) {
-      setCycleMonthKey(backend);
-      setCycleLoaded(true);
-      return;
-    }
-    // Fix A rule: keep "…" until loaded once, then keep last known value.
-  }
-
   function isInCycleMonth(dateStr?: string) {
     if (!dateStr) return false;
-    const ck = (cycleMonthKey || "").trim();
+    const ck = (cycle || "").trim();
     if (!ck || !isMonthKey(ck)) return false;
 
     const effective = cycleKeyFromReadingDate(dateStr);
@@ -592,8 +548,8 @@ export default function RoomPage() {
     loadFromCaches();
     backgroundRefreshIfStale();
 
-    // always sync shared cycle on page entry
-    void syncCycle();
+    // sync shared cycle on page entry (fast if cached)
+    void refreshCycle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
@@ -619,25 +575,25 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  // SSR-safe label + Fix A: only render cycle after cycleLoaded === true
+  // SSR-safe label (cached cycle shows immediately after mounted)
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
-    if (!cycleLoaded) return "…";
-    const k = String(cycleMonthKey || "").trim();
+    if (cycleLoading) return "…";
+    const k = String(cycle || "").trim();
     if (k && isMonthKey(k)) return k;
     return "…";
-  }, [mounted, cycleLoaded, cycleMonthKey]);
+  }, [mounted, cycleLoading, cycle]);
 
   // Cycle reading (from history), not "latest"
   const cycleReading = useMemo(() => {
-    if (!cycleLoaded) return null;
-    const ck = (cycleMonthKey || "").trim();
+    if (cycleLoading) return null;
+    const ck = (cycle || "").trim();
     if (!ck || !isMonthKey(ck)) return null;
 
     const list = sortNewestFirst(history || []);
     return list.find((r) => isInCycleMonth(r.date)) || null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history, cycleLoaded, cycleMonthKey]);
+  }, [history, cycleLoading, cycle]);
 
   const inCycle = mounted ? !!cycleReading : false;
   const buttonLabel = cycleReading ? "Edit" : "Add";
@@ -729,9 +685,7 @@ export default function RoomPage() {
     setShowConfirmSheet(false);
 
     const cycleKeyToUse =
-      cycleLoaded && cycleMonthKey && isMonthKey(cycleMonthKey)
-        ? cycleMonthKey
-        : currentMonthKeyVN();
+      !cycleLoading && cycle && isMonthKey(cycle) ? cycle : currentMonthKeyVN();
 
     const cycleTarget =
       !isEditing && cycleReading
@@ -835,7 +789,7 @@ export default function RoomPage() {
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
 
-      await syncCycle();
+      await refreshCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -899,7 +853,7 @@ export default function RoomPage() {
 
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
-      await syncCycle();
+      await refreshCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -952,7 +906,7 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
-  const showCycleNumbers = cycleLoaded && inCycle;
+  const showCycleNumbers = !cycleLoading && inCycle;
 
   const latestDien =
     showCycleNumbers &&

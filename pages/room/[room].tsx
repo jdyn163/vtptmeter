@@ -19,6 +19,10 @@ type CacheEnvelope<T> = { savedAt: number; data: T };
 const TZ = "Asia/Ho_Chi_Minh";
 const CYCLE_ROLLOVER_DAY = 25;
 
+function nowISO() {
+  return new Date().toISOString();
+}
+
 function formatDateShort(d: Date) {
   return d.toLocaleDateString();
 }
@@ -237,6 +241,61 @@ function upsertHouseHistoryCache(
   localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
+/* ===== IMPORTANT: dedupe "ghost rows" by VN day key ===== */
+function dayKeyVN(dateStr: string) {
+  const parts = vnYMD(dateStr);
+  if (!parts) return String(dateStr || "").trim();
+  return `${parts.y}-${pad2(parts.m)}-${pad2(parts.d)}`;
+}
+
+function dedupeByDayVN(list: Reading[]) {
+  const arr = Array.isArray(list) ? list.slice() : [];
+  const bestByDay = new Map<string, Reading>();
+
+  for (const r of arr) {
+    const k = dayKeyVN(r.date);
+    const prev = bestByDay.get(k);
+    if (!prev) {
+      bestByDay.set(k, r);
+      continue;
+    }
+
+    const tPrev = new Date(prev.date).getTime();
+    const tCurr = new Date(r.date).getTime();
+
+    const prevTimeOk = Number.isFinite(tPrev);
+    const currTimeOk = Number.isFinite(tCurr);
+
+    if (prevTimeOk && currTimeOk) {
+      if (tCurr > tPrev) bestByDay.set(k, r);
+      else if (tCurr === tPrev && (r.id ?? 0) > (prev.id ?? 0))
+        bestByDay.set(k, r);
+      continue;
+    }
+
+    if (!prevTimeOk && currTimeOk) {
+      bestByDay.set(k, r);
+      continue;
+    }
+
+    if (!prevTimeOk && !currTimeOk) {
+      if ((r.id ?? 0) > (prev.id ?? 0)) bestByDay.set(k, r);
+    }
+  }
+
+  const deduped = Array.from(bestByDay.values());
+  deduped.sort((a, b) => {
+    const da = new Date(a.date).getTime();
+    const db = new Date(b.date).getTime();
+    if (isNaN(da) && isNaN(db)) return 0;
+    if (isNaN(da)) return 1;
+    if (isNaN(db)) return -1;
+    return db - da;
+  });
+
+  return deduped;
+}
+
 // -------------------- Numeric-only helpers --------------------
 function digitsOnly(s: string) {
   return String(s ?? "").replace(/[^\d]/g, "");
@@ -343,7 +402,6 @@ export default function RoomPage() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
-  // third tab in History section
   const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
@@ -356,16 +414,18 @@ export default function RoomPage() {
   const [editing, setEditing] = useState<Reading | null>(null);
   const isEditing = !!editing;
 
+  const [editSource, setEditSource] = useState<"today" | "history" | null>(
+    null,
+  );
+
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // log state
   const [loadingLog, setLoadingLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
-  // shared cycle cache + background refresh
   const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
 
   const TTL_MS = 2 * 60 * 1000;
@@ -398,7 +458,8 @@ export default function RoomPage() {
       localStorage.getItem(historyKey(house)),
     );
     const list = cachedHist?.data?.[room];
-    setHistory(Array.isArray(list) ? list : []);
+    const safeList = dedupeByDayVN(Array.isArray(list) ? list : []);
+    setHistory(safeList);
     setLoadingHistory(false);
   }
 
@@ -435,9 +496,7 @@ export default function RoomPage() {
 
       if (!histFresh) {
         const r2 = await fetch(
-          `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house,
-          )}&limitPerRoom=24`,
+          `/api/meter?action=houseHistory&house=${encodeURIComponent(house)}&limitPerRoom=24`,
           { cache: "no-store" },
         );
         const j2 = await r2.json();
@@ -470,7 +529,9 @@ export default function RoomPage() {
 
       if (latestData && house) {
         upsertHouseHistoryCache(house, latestData, 24);
-        setHistory((prev) => upsertMonthlyHistory(prev, latestData, 24));
+        setHistory((prev) =>
+          dedupeByDayVN(upsertMonthlyHistory(prev, latestData, 24)),
+        );
       }
     } catch {
       // ignore
@@ -505,6 +566,7 @@ export default function RoomPage() {
     if (saving) return;
     setShowSheet(false);
     setEditing(null);
+    setEditSource(null);
     setMsg(null);
   }
 
@@ -526,6 +588,12 @@ export default function RoomPage() {
     }
   }
 
+  function findTodayRow(list: Reading[]) {
+    const todayKey = dayKeyVN(nowISO());
+    const arr = Array.isArray(list) ? list : [];
+    return arr.find((r) => dayKeyVN(r.date) === todayKey) || null;
+  }
+
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -536,6 +604,7 @@ export default function RoomPage() {
     setShowSheet(false);
     setShowConfirmSheet(false);
     setEditing(null);
+    setEditSource(null);
     setDienInput("");
     setNuocInput("");
     setNoteInput("");
@@ -548,12 +617,10 @@ export default function RoomPage() {
     loadFromCaches();
     backgroundRefreshIfStale();
 
-    // sync shared cycle on page entry (fast if cached)
     void refreshCycle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
-  // When switching to Log tab, fetch it
   useEffect(() => {
     if (tab === "log") refreshLogFromNetwork();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -575,7 +642,6 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  // SSR-safe label (cached cycle shows immediately after mounted)
   const effectiveCycleKey = useMemo(() => {
     if (!mounted) return "…";
     if (cycleLoading) return "…";
@@ -584,7 +650,6 @@ export default function RoomPage() {
     return "…";
   }, [mounted, cycleLoading, cycle]);
 
-  // Cycle reading (from history), not "latest"
   const cycleReading = useMemo(() => {
     if (cycleLoading) return null;
     const ck = (cycle || "").trim();
@@ -596,29 +661,35 @@ export default function RoomPage() {
   }, [history, cycleLoading, cycle]);
 
   const inCycle = mounted ? !!cycleReading : false;
-  const buttonLabel = cycleReading ? "Edit" : "Add";
 
-  function openSheet() {
+  const todayRow = useMemo(() => findTodayRow(history), [history]);
+  const topActionLabel = todayRow ? "Fix today" : "Add today";
+
+  function openTodaySheet() {
+    if (saving) return;
     setMsg(null);
-    setEditing(null);
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    if (cycleReading) {
+    const t = findTodayRow(history);
+
+    if (t) {
+      setEditing(t);
+      setEditSource("today");
       setDienInput(
-        typeof cycleReading.dien === "number" &&
-          Number.isFinite(cycleReading.dien)
-          ? String(cycleReading.dien)
+        typeof t.dien === "number" && Number.isFinite(t.dien)
+          ? String(t.dien)
           : "",
       );
       setNuocInput(
-        typeof cycleReading.nuoc === "number" &&
-          Number.isFinite(cycleReading.nuoc)
-          ? String(cycleReading.nuoc)
+        typeof t.nuoc === "number" && Number.isFinite(t.nuoc)
+          ? String(t.nuoc)
           : "",
       );
-      setNoteInput(String(cycleReading.note ?? ""));
+      setNoteInput(String(t.note ?? ""));
     } else {
+      setEditing(null);
+      setEditSource("today");
       setDienInput("");
       setNuocInput("");
       setNoteInput("");
@@ -629,6 +700,7 @@ export default function RoomPage() {
     if (saving) return;
     setMsg(null);
     setEditing(r);
+    setEditSource("history");
     setShowConfirmSheet(false);
     setShowSheet(true);
 
@@ -651,7 +723,7 @@ export default function RoomPage() {
     if (!canTapCard) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      openSheet();
+      openTodaySheet();
     }
   }
 
@@ -687,29 +759,17 @@ export default function RoomPage() {
     const cycleKeyToUse =
       !cycleLoading && cycle && isMonthKey(cycle) ? cycle : currentMonthKeyVN();
 
-    const cycleTarget =
-      !isEditing && cycleReading
-        ? { id: cycleReading.id, date: cycleReading.date }
-        : undefined;
-
     const target =
-      isEditing && editing
-        ? { id: editing.id, date: editing.date }
-        : cycleTarget;
+      isEditing && editing ? { id: editing.id, date: editing.date } : undefined;
 
     const willUpdate = !!target;
 
-    const effectiveDate =
-      isEditing && editing?.date
-        ? editing.date
-        : cycleReading?.date
-          ? cycleReading.date
-          : isoForCycleMonthKey(cycleKeyToUse);
+    const effectiveDate = willUpdate ? editing!.date : nowISO();
 
     const optimistic: Reading = {
       room,
       date: effectiveDate,
-      id: target?.id ?? latest?.id ?? 0,
+      id: target?.id ?? 0,
       dien: dienNum,
       nuoc: nuocNum,
       note: noteInput.trim(),
@@ -726,8 +786,8 @@ export default function RoomPage() {
             (x) => x.id === target.id && x.date === target.date,
           );
           const next = exists
-            ? sortNewestFirst(replaced).slice(0, 24)
-            : upsertMonthlyHistory(prev, optimistic, 24);
+            ? dedupeByDayVN(sortNewestFirst(replaced).slice(0, 24))
+            : dedupeByDayVN(upsertMonthlyHistory(prev, optimistic, 24));
 
           writeHouseHistoryRoomListToCache(house, room, next);
           recomputeLatestFromHistory(next);
@@ -737,7 +797,9 @@ export default function RoomPage() {
         upsertHouseLatestCache(house, optimistic);
         upsertHouseHistoryCache(house, optimistic, 24);
         setHistory((prev) => {
-          const next = upsertMonthlyHistory(prev, optimistic, 24);
+          const next = dedupeByDayVN(
+            upsertMonthlyHistory(prev, optimistic, 24),
+          );
           recomputeLatestFromHistory(next);
           return next;
         });
@@ -748,6 +810,7 @@ export default function RoomPage() {
     }
 
     setEditing(null);
+    setEditSource(null);
 
     setToast("Saved ✅");
     window.setTimeout(() => setToast(null), 1500);
@@ -760,35 +823,80 @@ export default function RoomPage() {
         return;
       }
 
-      const res = await fetch("/api/meter", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-vtpt-pin": pin,
-        },
-        body: JSON.stringify({
-          action: willUpdate ? "update" : "save",
-          room,
-          dien: dienNum,
-          nuoc: nuocNum,
-          note: noteInput.trim(),
-          cycleMonthKey: cycleKeyToUse,
-          date: effectiveDate,
-          target,
-        }),
-      });
+      if (willUpdate && target) {
+        const delRes = await fetch("/api/meter", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-vtpt-pin": pin,
+          },
+          body: JSON.stringify({
+            action: "delete",
+            room,
+            target,
+          }),
+        });
 
-      const json = await res.json();
-      if (!json.ok) {
-        setMsg(json.error || "Save failed.");
-        setSaving(false);
-        await refreshLatestFromNetwork();
-        return;
+        const delJson = await delRes.json();
+        if (!delJson.ok) {
+          setMsg(delJson.error || "Delete (edit step 1) failed.");
+          setSaving(false);
+          await refreshLatestFromNetwork();
+          return;
+        }
+
+        const saveRes = await fetch("/api/meter", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-vtpt-pin": pin,
+          },
+          body: JSON.stringify({
+            action: "save",
+            room,
+            dien: dienNum,
+            nuoc: nuocNum,
+            note: noteInput.trim(),
+            date: effectiveDate,
+          }),
+        });
+
+        const saveJson = await saveRes.json();
+        if (!saveJson.ok) {
+          setMsg(saveJson.error || "Save (edit step 2) failed.");
+          setSaving(false);
+          await refreshLatestFromNetwork();
+          return;
+        }
+      } else {
+        const res = await fetch("/api/meter", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-vtpt-pin": pin,
+          },
+          body: JSON.stringify({
+            action: "save",
+            room,
+            dien: dienNum,
+            nuoc: nuocNum,
+            note: noteInput.trim(),
+            cycleMonthKey: cycleKeyToUse,
+            date: effectiveDate,
+          }),
+        });
+
+        const json = await res.json();
+        if (!json.ok) {
+          setMsg(json.error || "Save failed.");
+          setSaving(false);
+          await refreshLatestFromNetwork();
+          return;
+        }
       }
 
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
-
       await refreshCycle();
 
       setSaving(false);
@@ -811,7 +919,7 @@ export default function RoomPage() {
       const next = prev.filter(
         (x) => !(x.id === editing.id && x.date === editing.date),
       );
-      const sorted = sortNewestFirst(next).slice(0, 24);
+      const sorted = dedupeByDayVN(sortNewestFirst(next).slice(0, 24));
 
       if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
       recomputeLatestFromHistory(sorted);
@@ -861,6 +969,7 @@ export default function RoomPage() {
       setSaving(false);
     } finally {
       setEditing(null);
+      setEditSource(null);
     }
   }
 
@@ -927,6 +1036,16 @@ export default function RoomPage() {
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
 
+  // ✅ FIX: show Delete whenever you're editing an existing row
+  const allowDelete = !!editing;
+
+  const sheetTitle =
+    editSource === "history"
+      ? "Edit history"
+      : isEditing
+        ? "Fix today"
+        : "Add today";
+
   return (
     <main
       style={{
@@ -985,8 +1104,14 @@ export default function RoomPage() {
 
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
           <div
-            onClick={() => canTapCard && openSheet()}
-            onKeyDown={onMeterCardKeyDown}
+            onClick={() => canTapCard && openTodaySheet()}
+            onKeyDown={(e) => {
+              if (!canTapCard) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openTodaySheet();
+              }
+            }}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -998,7 +1123,12 @@ export default function RoomPage() {
               cursor: canTapCard ? "pointer" : "not-allowed",
             }}
           >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>
+              Electric Meter{" "}
+              <span
+                style={{ fontSize: 12, opacity: 0.55, marginLeft: 8 }}
+              ></span>
+            </div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latestDien === null ? "— — —" : latestDien}
               <span
@@ -1015,7 +1145,7 @@ export default function RoomPage() {
           </div>
 
           <div
-            onClick={() => canTapCard && openSheet()}
+            onClick={() => canTapCard && openTodaySheet()}
             onKeyDown={onMeterCardKeyDown}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
@@ -1028,7 +1158,12 @@ export default function RoomPage() {
               cursor: canTapCard ? "pointer" : "not-allowed",
             }}
           >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>
+              Water Meter{" "}
+              <span
+                style={{ fontSize: 12, opacity: 0.55, marginLeft: 8 }}
+              ></span>
+            </div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latestNuoc === null ? "— — —" : latestNuoc}
               <span
@@ -1240,7 +1375,7 @@ export default function RoomPage() {
       {/* Edit Sheet (Step 1) */}
       <BottomSheet
         open={showSheet}
-        title={isEditing ? "Edit history" : `${buttonLabel} reading`}
+        title={sheetTitle}
         onClose={closeEditSheet}
         disabled={saving}
       >
@@ -1306,7 +1441,7 @@ export default function RoomPage() {
               gap: 10,
             }}
           >
-            {isEditing ? (
+            {allowDelete ? (
               <button
                 onClick={deleteEditingRow}
                 disabled={saving}
@@ -1360,7 +1495,7 @@ export default function RoomPage() {
         </div>
       </BottomSheet>
 
-      {/* Confirm Sheet (Step 2) - numbers only */}
+      {/* Confirm Sheet (Step 2) */}
       <BottomSheet
         open={showConfirmSheet}
         title="Confirm"

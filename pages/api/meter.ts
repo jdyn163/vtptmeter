@@ -145,6 +145,70 @@ async function scriptCycleSet(month: string, actor?: string) {
   });
 }
 
+function normalizeForwardedBody(body: Record<string, any>) {
+  // 1) Normalize update -> save (Apps Script often only supports "save")
+  if (typeof body.action === "string" && body.action.trim() === "update") {
+    body.action = "save";
+  }
+
+  // 2) If target is present, we are editing an existing row.
+  //    In that case, NEVER send cycleMonthKey, because some upstream scripts
+  //    treat it as "create a cycle row" and will append a new row.
+  const target = body.target;
+  const hasTarget =
+    target &&
+    typeof target === "object" &&
+    typeof target.id === "number" &&
+    Number.isFinite(target.id) &&
+    typeof target.date === "string" &&
+    target.date.trim().length > 0;
+
+  if (hasTarget) {
+    if ("cycleMonthKey" in body) delete body.cycleMonthKey;
+
+    // Safety: if date is missing, fall back to target.date so we don't create a new row
+    if (typeof body.date !== "string" || !body.date.trim()) {
+      body.date = target.date;
+    }
+  }
+
+  return body;
+}
+
+function wantsDebug(req: NextApiRequest, pin: string) {
+  // Only allow debug output if:
+  // - admin pin, AND
+  // - explicitly requested
+  const q = String(req.query.debug || "").trim();
+  const h = String(req.headers["x-vtpt-debug"] || "").trim();
+  const b =
+    req.body && typeof req.body.debug === "boolean" ? req.body.debug : false;
+
+  return isAdminPin(pin) && (q === "1" || h === "1" || b === true);
+}
+
+function sanitizeForDebug(input: any) {
+  // Make a shallow safe copy; never include secrets
+  const obj: Record<string, any> =
+    input && typeof input === "object" ? { ...input } : { value: input };
+
+  // Strip anything that could contain secrets
+  delete obj.pin;
+  delete obj.token;
+  delete obj.SCRIPT_TOKEN;
+  delete obj.scriptToken;
+
+  // If target exists, keep only id/date
+  if (obj.target && typeof obj.target === "object") {
+    obj.target = {
+      id: obj.target.id,
+      date: obj.target.date,
+    };
+  }
+
+  return obj;
+}
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ApiOk | ApiErr>,
@@ -199,6 +263,7 @@ export default async function handler(
       const action = getAction(req);
       const pin = getPin(req);
       const actor = actorForPin(pin);
+      const debug = wantsDebug(req, pin);
 
       if (!action) {
         return res.status(400).json({ ok: false, error: "Missing action" });
@@ -223,6 +288,20 @@ export default async function handler(
           }
 
           const { status, json } = await scriptCycleSet(month, actor);
+
+          if (debug) {
+            return res.status(status).json({
+              ...(json || {}),
+              debug: {
+                forwarded: sanitizeForDebug({
+                  action: "cycleSet",
+                  month,
+                  actor,
+                }),
+              },
+            });
+          }
+
           return res.status(status).json(json);
         }
 
@@ -242,12 +321,24 @@ export default async function handler(
             return res.status(status).json(json);
           }
 
-          return res.status(200).json({
+          const out: any = {
             ok: true,
             nextMonthKey: next,
             message: `Approved ✅ Cycle moved to ${next}`,
             backend: json,
-          });
+          };
+
+          if (debug) {
+            out.debug = {
+              forwarded: sanitizeForDebug({
+                action: "cycleSet",
+                month: next,
+                actor,
+              }),
+            };
+          }
+
+          return res.status(200).json(out);
         }
       }
 
@@ -265,6 +356,9 @@ export default async function handler(
       // If the client mistakenly sends pin in body, strip it out so it never hits Sheets
       if ("pin" in forwardedBody) delete forwardedBody.pin;
 
+      // Normalize risky fields before forwarding (prevents edit => append bugs)
+      normalizeForwardedBody(forwardedBody);
+
       // Add audit fields (Apps Script can pick whichever it uses)
       if (actor) {
         forwardedBody.actor = actor;
@@ -277,6 +371,18 @@ export default async function handler(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(forwardedBody),
       });
+
+      // Debug wrapper (admin-only)
+      if (debug) {
+        return res.status(status).json({
+          ok: true,
+          upstreamStatus: status,
+          upstream: json,
+          debug: {
+            forwarded: sanitizeForDebug(forwardedBody),
+          },
+        });
+      }
 
       return res.status(status).json(json);
     }

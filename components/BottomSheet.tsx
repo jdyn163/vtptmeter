@@ -69,8 +69,10 @@ export default function BottomSheet({
         }}
       />
 
-      {/* Sheet (full width) */}
+      {/* Sheet */}
       <div
+        role="dialog"
+        aria-modal="true"
         style={{
           position: "fixed",
           left: 0,
@@ -82,6 +84,9 @@ export default function BottomSheet({
           borderTopRightRadius: 18,
           boxShadow: "0 -12px 30px rgba(0,0,0,0.18)",
 
+          maxHeight: "85vh",
+          overflow: "hidden",
+
           transform: isEnter || isExit ? "translateY(24px)" : "translateY(0)",
           opacity: isEnter || isExit ? 0 : 1,
           transition:
@@ -89,48 +94,68 @@ export default function BottomSheet({
           willChange: "transform, opacity",
         }}
       >
-        {/* Inner wrapper: NOW full width too (responsive via padding) */}
+        {/* Scroll container */}
         <div
           style={{
-            width: "100%",
-            padding: 16,
-            paddingBottom: "calc(16px + env(safe-area-inset-bottom))",
-            boxSizing: "border-box",
+            maxHeight: "85vh",
+            overflowY: "auto",
+            WebkitOverflowScrolling: "touch",
           }}
         >
-          {/* Header */}
+          {/* Inner wrapper */}
           <div
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              marginBottom: 12,
+              width: "100%",
+              padding: 16,
+              paddingBottom: "calc(16px + env(safe-area-inset-bottom))",
+              boxSizing: "border-box",
             }}
           >
-            <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
-              {title}
-            </div>
-
-            <button
-              onClick={close}
-              disabled={disabled}
-              aria-label="Close"
+            {/* Drag handle */}
+            <div
               style={{
-                width: 34,
-                height: 34,
+                width: 44,
+                height: 5,
                 borderRadius: 999,
-                border: "1px solid #ddd",
-                background: "#fff",
-                cursor: disabled ? "not-allowed" : "pointer",
-                fontWeight: 900,
-                opacity: disabled ? 0.6 : 1,
+                background: "#e5e5e5",
+                margin: "2px auto 12px",
+              }}
+            />
+
+            {/* Header */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginBottom: 12,
               }}
             >
-              ×
-            </button>
-          </div>
+              <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
+                {title}
+              </div>
 
-          {children}
+              <button
+                onClick={close}
+                disabled={disabled}
+                aria-label="Close"
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 999,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: disabled ? 0.6 : 1,
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {children}
+          </div>
         </div>
       </div>
     </>

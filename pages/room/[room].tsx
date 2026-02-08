@@ -1,9 +1,7 @@
-// pages/room/[room].tsx
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import BottomSheet from "../../components/BottomSheet";
-import { useCycle } from "../../lib/useCycle";
 
 type Reading = {
   room: string;
@@ -15,13 +13,6 @@ type Reading = {
 };
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
-
-const TZ = "Asia/Ho_Chi_Minh";
-const CYCLE_ROLLOVER_DAY = 25;
-
-function nowISO() {
-  return new Date().toISOString();
-}
 
 function formatDateShort(d: Date) {
   return d.toLocaleDateString();
@@ -53,106 +44,27 @@ function safeJsonParse<T>(s: string | null): T | null {
   }
 }
 
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
-}
-
-function monthKeyFromParts(y: number, m: number) {
-  return `${y}-${pad2(m)}`;
-}
-
-function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test((s || "").trim());
-}
-
-/* ===== month key (VN timezone) ===== */
-
-function monthKeyVN(date = new Date()) {
-  try {
-    const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TZ,
-      year: "numeric",
-      month: "2-digit",
-    });
-    const parts = fmt.formatToParts(date);
-    const y = Number(parts.find((p) => p.type === "year")?.value || "");
-    const m = Number(parts.find((p) => p.type === "month")?.value || "");
-    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
-      return monthKeyFromParts(y, m);
-    }
-  } catch {
-    // fall through
-  }
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
-}
-
-function currentMonthKeyVN() {
-  return monthKeyVN(new Date());
-}
-
-/* ===== cycle helpers (approval-driven month, with rollover day) ===== */
-
-function nextMonthKey(key: string) {
-  if (!isMonthKey(key)) return key;
-  const [yy, mm] = key.split("-").map(Number);
-  const d = new Date(yy, (mm || 1) - 1, 1);
-  d.setMonth(d.getMonth() + 1);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
-}
-
-// VN year/month/day from an ISO-ish string
-function vnYMD(dateStr: string): { y: number; m: number; d: number } | null {
-  const dt = new Date(dateStr);
-  if (Number.isNaN(dt.getTime())) return null;
-
-  try {
-    const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TZ,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    const parts = fmt.formatToParts(dt);
-    const y = Number(parts.find((p) => p.type === "year")?.value || "");
-    const m = Number(parts.find((p) => p.type === "month")?.value || "");
-    const d = Number(parts.find((p) => p.type === "day")?.value || "");
-    if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
-      return { y, m, d };
-    }
-  } catch {
-    // ignore
-  }
-
-  // fallback local
-  return { y: dt.getFullYear(), m: dt.getMonth() + 1, d: dt.getDate() };
-}
-
-// Convert a real reading date -> business cycle key (with rollover)
-function cycleKeyFromReadingDate(dateStr: string): string | null {
-  const parts = vnYMD(dateStr);
-  if (!parts) return null;
-
-  const mk = monthKeyFromParts(parts.y, parts.m);
-  if (!isMonthKey(mk)) return null;
-
-  return parts.d >= CYCLE_ROLLOVER_DAY ? nextMonthKey(mk) : mk;
-}
-
-/* ===== local month key (for cache de-dupe) ===== */
-
-function monthKeyFromDateStringLocal(dateStr: string) {
+function monthKeyFromDateString(dateStr: string) {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return "unknown";
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function currentMonthKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isThisMonth(dateStr?: string) {
+  if (!dateStr) return false;
+  return monthKeyFromDateString(dateStr) === currentMonthKey();
+}
+
 function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
-  const mk = monthKeyFromDateStringLocal(incoming.date);
+  const mk = monthKeyFromDateString(incoming.date);
 
   const next = Array.isArray(list) ? list.slice() : [];
-  const filtered = next.filter(
-    (r) => monthKeyFromDateStringLocal(r.date) !== mk,
-  );
+  const filtered = next.filter((r) => monthKeyFromDateString(r.date) !== mk);
 
   filtered.unshift(incoming);
 
@@ -173,7 +85,7 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 
   const key = latestKey(house);
   const cached = safeJsonParse<CacheEnvelope<Reading[]>>(
-    localStorage.getItem(key),
+    localStorage.getItem(key)
   );
 
   const data = Array.isArray(cached?.data) ? cached!.data.slice() : [];
@@ -188,13 +100,13 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 function writeHouseHistoryRoomListToCache(
   house: string,
   room: string,
-  nextList: Reading[],
+  nextList: Reading[]
 ) {
   if (!house || !room) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key),
+    localStorage.getItem(key)
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -208,13 +120,13 @@ function writeHouseHistoryRoomListToCache(
 function upsertHouseHistoryCache(
   house: string,
   reading: Reading,
-  maxPerRoom = 24,
+  maxPerRoom = 24
 ) {
   if (!house) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key),
+    localStorage.getItem(key)
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -227,72 +139,39 @@ function upsertHouseHistoryCache(
   localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
-/* ===== IMPORTANT: dedupe "ghost rows" by VN day key ===== */
-function dayKeyVN(dateStr: string) {
-  const parts = vnYMD(dateStr);
-  if (!parts) return String(dateStr || "").trim();
-  return `${parts.y}-${pad2(parts.m)}-${pad2(parts.d)}`;
-}
-
-function dedupeByDayVN(list: Reading[]) {
-  const arr = Array.isArray(list) ? list.slice() : [];
-  const bestByDay = new Map<string, Reading>();
-
-  for (const r of arr) {
-    const k = dayKeyVN(r.date);
-    const prev = bestByDay.get(k);
-    if (!prev) {
-      bestByDay.set(k, r);
-      continue;
-    }
-
-    const tPrev = new Date(prev.date).getTime();
-    const tCurr = new Date(r.date).getTime();
-
-    const prevTimeOk = Number.isFinite(tPrev);
-    const currTimeOk = Number.isFinite(tCurr);
-
-    if (prevTimeOk && currTimeOk) {
-      if (tCurr > tPrev) bestByDay.set(k, r);
-      else if (tCurr === tPrev && (r.id ?? 0) > (prev.id ?? 0))
-        bestByDay.set(k, r);
-      continue;
-    }
-
-    if (!prevTimeOk && currTimeOk) {
-      bestByDay.set(k, r);
-      continue;
-    }
-
-    if (!prevTimeOk && !currTimeOk) {
-      if ((r.id ?? 0) > (prev.id ?? 0)) bestByDay.set(k, r);
-    }
-  }
-
-  const deduped = Array.from(bestByDay.values());
-  deduped.sort((a, b) => {
-    const da = new Date(a.date).getTime();
-    const db = new Date(b.date).getTime();
-    if (isNaN(da) && isNaN(db)) return 0;
-    if (isNaN(da)) return 1;
-    if (isNaN(db)) return -1;
-    return db - da;
-  });
-
-  return deduped;
-}
-
-// -------------------- Input helpers --------------------
-// We DO NOT sanitize onChange (to avoid mobile/desktop "blink then clear").
-// We sanitize ONLY when parsing.
+// -------------------- Numeric-only helpers --------------------
 function digitsOnly(s: string) {
   return String(s ?? "").replace(/[^\d]/g, "");
 }
 
+function setNumberOnly(raw: string, setter: (v: string) => void) {
+  setter(digitsOnly(raw));
+}
+
+function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
+  const allowed = [
+    "Backspace",
+    "Delete",
+    "Tab",
+    "Enter",
+    "Escape",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+    "Home",
+    "End",
+  ];
+  if (allowed.includes(e.key)) return;
+  if (e.ctrlKey || e.metaKey) return;
+  if (/^\d$/.test(e.key)) return;
+  e.preventDefault();
+}
+
 function parseOptionalNumberFromInput(s: string): number | null {
-  const rawDigits = digitsOnly(String(s ?? ""));
-  if (!rawDigits.length) return null;
-  const n = Number(rawDigits);
+  const raw = String(s ?? "").trim();
+  if (!raw.length) return null;
+  const n = Number(raw);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -306,12 +185,14 @@ function Field({
   label,
   value,
   onChange,
+  onKeyDown,
   onPaste,
   placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => void;
   placeholder: string;
 }) {
@@ -328,12 +209,13 @@ function Field({
         }}
       >
         <input
-          type="tel"
           inputMode="numeric"
+          pattern="[0-9]*"
           autoComplete="off"
           enterKeyHint="done"
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={placeholder}
           style={{
@@ -355,14 +237,13 @@ export default function RoomPage() {
   const room = (router.query.room as string) || "";
   const house = (router.query.house as string) || "";
 
-  const [mounted, setMounted] = useState(false);
-
   const [loadingLatest, setLoadingLatest] = useState(true);
   const [latest, setLatest] = useState<Reading | null>(null);
 
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
+  // NEW: third tab in History section
   const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
@@ -375,39 +256,23 @@ export default function RoomPage() {
   const [editing, setEditing] = useState<Reading | null>(null);
   const isEditing = !!editing;
 
-  const [editSource, setEditSource] = useState<"today" | "history" | null>(
-    null,
-  );
-
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // NEW: log state
   const [loadingLog, setLoadingLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
-  const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
-
   const TTL_MS = 2 * 60 * 1000;
-
-  function isInCycleMonth(dateStr?: string) {
-    if (!dateStr) return false;
-    const ck = (cycle || "").trim();
-    if (!ck || !isMonthKey(ck)) return false;
-
-    const effective = cycleKeyFromReadingDate(dateStr);
-    if (!effective || !isMonthKey(effective)) return false;
-
-    return effective === ck;
-  }
 
   function loadFromCaches() {
     if (!room || !house) return;
 
     setLoadingLatest(true);
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house)),
+      localStorage.getItem(latestKey(house))
     );
     const foundLatest =
       cachedLatest?.data?.find((x) => x.room === room) || null;
@@ -416,11 +281,10 @@ export default function RoomPage() {
 
     setLoadingHistory(true);
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house)),
+      localStorage.getItem(historyKey(house))
     );
     const list = cachedHist?.data?.[room];
-    const safeList = dedupeByDayVN(Array.isArray(list) ? list : []);
-    setHistory(safeList);
+    setHistory(Array.isArray(list) ? list : []);
     setLoadingHistory(false);
   }
 
@@ -428,10 +292,10 @@ export default function RoomPage() {
     if (!house) return;
 
     const latestCache = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house)),
+      localStorage.getItem(latestKey(house))
     );
     const histCache = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house)),
+      localStorage.getItem(historyKey(house))
     );
 
     const latestFresh =
@@ -444,30 +308,28 @@ export default function RoomPage() {
     try {
       if (!latestFresh) {
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
-          { cache: "no-store" },
+          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr }),
+          JSON.stringify({ savedAt: Date.now(), data: arr })
         );
       }
 
       if (!histFresh) {
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house,
-          )}&limitPerRoom=24`,
-          { cache: "no-store" },
+            house
+          )}&limitPerRoom=24`
         );
         const j2 = await r2.json();
         const data: Record<string, Reading[]> =
           j2 && j2.ok && j2.data ? j2.data : {};
         localStorage.setItem(
           historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data }),
+          JSON.stringify({ savedAt: Date.now(), data })
         );
       }
 
@@ -481,8 +343,7 @@ export default function RoomPage() {
     if (!room) return;
     try {
       const latestRes = await fetch(
-        `/api/meter?room=${encodeURIComponent(room)}&action=latest`,
-        { cache: "no-store" },
+        `/api/meter?room=${encodeURIComponent(room)}&action=latest`
       );
       const latestJson = await latestRes.json();
       const latestData: Reading | null = latestJson?.data || null;
@@ -492,9 +353,7 @@ export default function RoomPage() {
 
       if (latestData && house) {
         upsertHouseHistoryCache(house, latestData, 24);
-        setHistory((prev) =>
-          dedupeByDayVN(upsertMonthlyHistory(prev, latestData, 24)),
-        );
+        setHistory((prev) => upsertMonthlyHistory(prev, latestData, 24));
       }
     } catch {
       // ignore
@@ -507,8 +366,7 @@ export default function RoomPage() {
     setLogErr(null);
     try {
       const r = await fetch(
-        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`,
-        { cache: "no-store" },
+        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`
       );
       const j = await r.json();
       if (!j?.ok) {
@@ -529,14 +387,13 @@ export default function RoomPage() {
     if (saving) return;
     setShowSheet(false);
     setEditing(null);
-    setEditSource(null);
     setMsg(null);
   }
 
   function sortNewestFirst(list: Reading[]) {
     const next = Array.isArray(list) ? list.slice() : [];
     next.sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
     );
     return next;
   }
@@ -551,23 +408,12 @@ export default function RoomPage() {
     }
   }
 
-  function findTodayRow(list: Reading[]) {
-    const todayKey = dayKeyVN(nowISO());
-    const arr = Array.isArray(list) ? list : [];
-    return arr.find((r) => dayKeyVN(r.date) === todayKey) || null;
-  }
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
   useEffect(() => {
     if (!room) return;
 
     setShowSheet(false);
     setShowConfirmSheet(false);
     setEditing(null);
-    setEditSource(null);
     setDienInput("");
     setNuocInput("");
     setNoteInput("");
@@ -579,11 +425,10 @@ export default function RoomPage() {
 
     loadFromCaches();
     backgroundRefreshIfStale();
-
-    void refreshCycle();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
+  // When switching to Log tab, fetch it
   useEffect(() => {
     if (tab === "log") refreshLogFromNetwork();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -605,96 +450,64 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  const effectiveCycleKey = useMemo(() => {
-    if (!mounted) return "…";
-    if (cycleLoading) return "…";
-    const k = String(cycle || "").trim();
-    if (k && isMonthKey(k)) return k;
-    return "…";
-  }, [mounted, cycleLoading, cycle]);
+  const hasThisMonth = !!(latest && isThisMonth(latest.date));
+  const buttonLabel = hasThisMonth ? "Edit" : "Add";
 
-  const cycleReading = useMemo(() => {
-    if (cycleLoading) return null;
-    const ck = (cycle || "").trim();
-    if (!ck || !isMonthKey(ck)) return null;
-
-    const list = sortNewestFirst(history || []);
-    return list.find((r) => isInCycleMonth(r.date)) || null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history, cycleLoading, cycle]);
-
-  const inCycle = mounted ? !!cycleReading : false;
-
-  function openTodaySheet() {
-    if (saving) return;
+  function openSheet() {
     setMsg(null);
+    setEditing(null);
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    const t = findTodayRow(history);
-
-    if (t) {
-      setEditing(t);
-      setEditSource("today");
+    // ✅ IMPORTANT: New month should be EMPTY (do NOT carry last month's numbers)
+    if (latest && isThisMonth(latest.date)) {
       setDienInput(
-        typeof t.dien === "number" && Number.isFinite(t.dien)
-          ? String(t.dien)
-          : "",
+        typeof latest.dien === "number" && Number.isFinite(latest.dien)
+          ? String(latest.dien)
+          : ""
       );
       setNuocInput(
-        typeof t.nuoc === "number" && Number.isFinite(t.nuoc)
-          ? String(t.nuoc)
-          : "",
+        typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
+          ? String(latest.nuoc)
+          : ""
       );
-      setNoteInput(String(t.note ?? ""));
-      return;
+      setNoteInput(String(latest.note ?? ""));
+    } else {
+      setDienInput("");
+      setNuocInput("");
+      setNoteInput("");
     }
-
-    // Add today: prefill from cycleReading ONLY if we are currently in cycle
-    setEditing(null);
-    setEditSource("today");
-
-    const prefill = cycleReading && inCycle ? cycleReading : null;
-
-    setDienInput(
-      prefill &&
-        typeof prefill.dien === "number" &&
-        Number.isFinite(prefill.dien)
-        ? String(prefill.dien)
-        : "",
-    );
-    setNuocInput(
-      prefill &&
-        typeof prefill.nuoc === "number" &&
-        Number.isFinite(prefill.nuoc)
-        ? String(prefill.nuoc)
-        : "",
-    );
-    setNoteInput("");
   }
 
   function openEditRow(r: Reading) {
     if (saving) return;
     setMsg(null);
     setEditing(r);
-    setEditSource("history");
     setShowConfirmSheet(false);
     setShowSheet(true);
 
     setDienInput(
       typeof r.dien === "number" && Number.isFinite(r.dien)
         ? String(r.dien)
-        : "",
+        : ""
     );
     setNuocInput(
       typeof r.nuoc === "number" && Number.isFinite(r.nuoc)
         ? String(r.nuoc)
-        : "",
+        : ""
     );
     setNoteInput(String(r.note ?? ""));
   }
 
   const canTapCard = !saving && !loadingLatest && !!room && !!house;
+
+  function onMeterCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (!canTapCard) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openSheet();
+    }
+  }
 
   function requestConfirmSave() {
     setMsg(null);
@@ -725,39 +538,22 @@ export default function RoomPage() {
     setSaving(true);
     setShowConfirmSheet(false);
 
-    const cycleKeyToUse =
-      !cycleLoading && cycle && isMonthKey(cycle) ? cycle : currentMonthKeyVN();
-
-    const target =
-      isEditing && editing ? { id: editing.id, date: editing.date } : undefined;
-
-    const willUpdate = !!target;
-
-    const effectiveDate = willUpdate ? editing!.date : nowISO();
-
     const optimistic: Reading = {
       room,
-      date: effectiveDate,
-      id: target?.id ?? 0,
+      date: editing?.date ?? new Date().toISOString(),
+      id: editing?.id ?? latest?.id ?? 0,
       dien: dienNum,
       nuoc: nuocNum,
       note: noteInput.trim(),
     };
 
     if (house) {
-      if (willUpdate && target) {
+      if (isEditing && editing) {
         setHistory((prev) => {
           const replaced = prev.map((x) =>
-            x.id === target.id && x.date === target.date ? optimistic : x,
+            x.id === editing.id && x.date === editing.date ? optimistic : x
           );
-
-          const exists = prev.some(
-            (x) => x.id === target.id && x.date === target.date,
-          );
-          const next = exists
-            ? dedupeByDayVN(sortNewestFirst(replaced).slice(0, 24))
-            : dedupeByDayVN(upsertMonthlyHistory(prev, optimistic, 24));
-
+          const next = sortNewestFirst(replaced).slice(0, 24);
           writeHouseHistoryRoomListToCache(house, room, next);
           recomputeLatestFromHistory(next);
           return next;
@@ -766,9 +562,7 @@ export default function RoomPage() {
         upsertHouseLatestCache(house, optimistic);
         upsertHouseHistoryCache(house, optimistic, 24);
         setHistory((prev) => {
-          const next = dedupeByDayVN(
-            upsertMonthlyHistory(prev, optimistic, 24),
-          );
+          const next = upsertMonthlyHistory(prev, optimistic, 24);
           recomputeLatestFromHistory(next);
           return next;
         });
@@ -779,7 +573,6 @@ export default function RoomPage() {
     }
 
     setEditing(null);
-    setEditSource(null);
 
     setToast("Saved ✅");
     window.setTimeout(() => setToast(null), 1500);
@@ -792,81 +585,36 @@ export default function RoomPage() {
         return;
       }
 
-      if (willUpdate && target) {
-        const delRes = await fetch("/api/meter", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-vtpt-pin": pin,
-          },
-          body: JSON.stringify({
-            action: "delete",
-            room,
-            target,
-          }),
-        });
+      const res = await fetch("/api/meter", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-vtpt-pin": pin,
+        },
+        body: JSON.stringify({
+          action: isEditing ? "update" : "save",
+          room,
+          dien: dienNum,
+          nuoc: nuocNum,
+          note: noteInput.trim(),
+          target:
+            isEditing && editing
+              ? { id: editing.id, date: editing.date }
+              : undefined,
+        }),
+      });
 
-        const delJson = await delRes.json();
-        if (!delJson.ok) {
-          setMsg(delJson.error || "Delete (edit step 1) failed.");
-          setSaving(false);
-          await refreshLatestFromNetwork();
-          return;
-        }
-
-        const saveRes = await fetch("/api/meter", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-vtpt-pin": pin,
-          },
-          body: JSON.stringify({
-            action: "save",
-            room,
-            dien: dienNum,
-            nuoc: nuocNum,
-            note: noteInput.trim(),
-            date: effectiveDate,
-          }),
-        });
-
-        const saveJson = await saveRes.json();
-        if (!saveJson.ok) {
-          setMsg(saveJson.error || "Save (edit step 2) failed.");
-          setSaving(false);
-          await refreshLatestFromNetwork();
-          return;
-        }
-      } else {
-        const res = await fetch("/api/meter", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-vtpt-pin": pin,
-          },
-          body: JSON.stringify({
-            action: "save",
-            room,
-            dien: dienNum,
-            nuoc: nuocNum,
-            note: noteInput.trim(),
-            cycleMonthKey: cycleKeyToUse,
-            date: effectiveDate,
-          }),
-        });
-
-        const json = await res.json();
-        if (!json.ok) {
-          setMsg(json.error || "Save failed.");
-          setSaving(false);
-          await refreshLatestFromNetwork();
-          return;
-        }
+      const json = await res.json();
+      if (!json.ok) {
+        setMsg(json.error || "Save failed.");
+        setSaving(false);
+        await refreshLatestFromNetwork();
+        return;
       }
 
       await refreshLatestFromNetwork();
+      // If user is on Log tab, refresh it too
       if (tab === "log") await refreshLogFromNetwork();
-      await refreshCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -886,9 +634,9 @@ export default function RoomPage() {
 
     setHistory((prev) => {
       const next = prev.filter(
-        (x) => !(x.id === editing.id && x.date === editing.date),
+        (x) => !(x.id === editing.id && x.date === editing.date)
       );
-      const sorted = dedupeByDayVN(sortNewestFirst(next).slice(0, 24));
+      const sorted = sortNewestFirst(next).slice(0, 24);
 
       if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
       recomputeLatestFromHistory(sorted);
@@ -930,7 +678,6 @@ export default function RoomPage() {
 
       await refreshLatestFromNetwork();
       if (tab === "log") await refreshLogFromNetwork();
-      await refreshCycle();
 
       setSaving(false);
     } catch (err: any) {
@@ -938,7 +685,6 @@ export default function RoomPage() {
       setSaving(false);
     } finally {
       setEditing(null);
-      setEditSource(null);
     }
   }
 
@@ -965,10 +711,10 @@ export default function RoomPage() {
         diff === null
           ? undefined
           : diff > 0
-            ? "#16a34a"
-            : diff < 0
-              ? "#dc2626"
-              : undefined;
+          ? "#16a34a"
+          : diff < 0
+          ? "#dc2626"
+          : undefined;
 
       const d = new Date(row.date);
       const safeDate = isNaN(d.getTime()) ? null : d;
@@ -984,36 +730,27 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
-  const showCycleNumbers = !cycleLoading && inCycle;
+  // ✅ show "This month reading" as empty unless latest is in THIS month
+  const showThisMonthNumbers = hasThisMonth;
 
   const latestDien =
-    showCycleNumbers &&
-    cycleReading &&
-    typeof cycleReading.dien === "number" &&
-    Number.isFinite(cycleReading.dien)
-      ? cycleReading.dien
+    showThisMonthNumbers &&
+    latest &&
+    typeof latest.dien === "number" &&
+    Number.isFinite(latest.dien)
+      ? latest.dien
       : null;
 
   const latestNuoc =
-    showCycleNumbers &&
-    cycleReading &&
-    typeof cycleReading.nuoc === "number" &&
-    Number.isFinite(cycleReading.nuoc)
-      ? cycleReading.nuoc
+    showThisMonthNumbers &&
+    latest &&
+    typeof latest.nuoc === "number" &&
+    Number.isFinite(latest.nuoc)
+      ? latest.nuoc
       : null;
 
-  // Confirm view uses parsed digits (so if user typed spaces, it still works)
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
-
-  const allowDelete = !!editing;
-
-  const sheetTitle =
-    editSource === "history"
-      ? "Edit history"
-      : isEditing
-        ? "Fix today"
-        : "Add today";
 
   return (
     <main
@@ -1045,9 +782,6 @@ export default function RoomPage() {
               ? `Last recorded: ${formatDateTime(latestDate)}`
               : "No record yet"}
           </div>
-          <div style={{ fontSize: 11, opacity: 0.45, marginTop: 2 }}>
-            Cycle month: {effectiveCycleKey}
-          </div>
         </div>
 
         {toast && (
@@ -1073,7 +807,8 @@ export default function RoomPage() {
 
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
           <div
-            onClick={() => canTapCard && openTodaySheet()}
+            onClick={() => canTapCard && openSheet()}
+            onKeyDown={onMeterCardKeyDown}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -1102,7 +837,8 @@ export default function RoomPage() {
           </div>
 
           <div
-            onClick={() => canTapCard && openTodaySheet()}
+            onClick={() => canTapCard && openSheet()}
+            onKeyDown={onMeterCardKeyDown}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -1326,13 +1062,7 @@ export default function RoomPage() {
       {/* Edit Sheet (Step 1) */}
       <BottomSheet
         open={showSheet}
-        title={
-          editSource === "history"
-            ? "Edit history"
-            : isEditing
-              ? "Fix today"
-              : "Add today"
-        }
+        title={isEditing ? "Edit history" : `${buttonLabel} reading`}
         onClose={closeEditSheet}
         disabled={saving}
       >
@@ -1340,28 +1070,31 @@ export default function RoomPage() {
           <Field
             label="Điện"
             value={dienInput}
-            onChange={setDienInput}
+            onChange={(raw) => setNumberOnly(raw, setDienInput)}
+            onKeyDown={blockNonNumericKeys}
             onPaste={(e) => {
-              // allow paste, but keep it tidy
               e.preventDefault();
               setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Ghi số điện"
+            placeholder="Enter điện"
           />
 
           <Field
             label="Nước"
             value={nuocInput}
-            onChange={setNuocInput}
+            onChange={(raw) => setNumberOnly(raw, setNuocInput)}
+            onKeyDown={blockNonNumericKeys}
             onPaste={(e) => {
               e.preventDefault();
               setNuocInput(digitsOnly(e.clipboardData.getData("text")));
             }}
-            placeholder="Ghi số nước"
+            placeholder="Enter nước"
           />
 
           <div style={{ display: "grid", gap: 6 }}>
-            <div style={{ fontWeight: 800, marginLeft: 2 }}>Ghi chú</div>
+            <div style={{ fontWeight: 800, marginLeft: 2 }}>
+              Note (optional)
+            </div>
             <div
               style={{
                 background: "#fff",
@@ -1397,7 +1130,7 @@ export default function RoomPage() {
               gap: 10,
             }}
           >
-            {allowDelete ? (
+            {isEditing ? (
               <button
                 onClick={deleteEditingRow}
                 disabled={saving}
@@ -1431,17 +1164,7 @@ export default function RoomPage() {
             )}
 
             <button
-              onClick={() => {
-                setMsg(null);
-                const dienNum = parseOptionalNumberFromInput(dienInput);
-                const nuocNum = parseOptionalNumberFromInput(nuocInput);
-                if (dienNum === null && nuocNum === null) {
-                  setMsg("Enter at least one meter value (Điện or Nước).");
-                  return;
-                }
-                setShowSheet(false);
-                setShowConfirmSheet(true);
-              }}
+              onClick={requestConfirmSave}
               disabled={saving}
               style={{
                 padding: 12,
@@ -1461,7 +1184,7 @@ export default function RoomPage() {
         </div>
       </BottomSheet>
 
-      {/* Confirm Sheet (Step 2) */}
+      {/* Confirm Sheet (Step 2) - numbers only */}
       <BottomSheet
         open={showConfirmSheet}
         title="Confirm"

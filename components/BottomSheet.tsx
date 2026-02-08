@@ -48,7 +48,6 @@ export default function BottomSheet({
 
   const isEnter = phase === "enter";
   const isExit = phase === "exit";
-  const isAnimating = isEnter || isExit;
 
   const close = () => {
     if (disabled) return;
@@ -70,10 +69,8 @@ export default function BottomSheet({
         }}
       />
 
-      {/* Sheet */}
+      {/* Sheet (full width) */}
       <div
-        role="dialog"
-        aria-modal="true"
         style={{
           position: "fixed",
           left: 0,
@@ -85,84 +82,55 @@ export default function BottomSheet({
           borderTopRightRadius: 18,
           boxShadow: "0 -12px 30px rgba(0,0,0,0.18)",
 
-          maxHeight: "85vh",
-          overflow: "hidden",
-
-          // IMPORTANT: no transform when fully open (mobile typing stability)
-          transform: isAnimating ? "translateY(24px)" : "none",
-          opacity: isAnimating ? 0 : 1,
-
+          transform: isEnter || isExit ? "translateY(24px)" : "translateY(0)",
+          opacity: isEnter || isExit ? 0 : 1,
           transition:
             "transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease",
-          willChange: isAnimating ? "transform, opacity" : undefined,
-
-          // helps reduce iOS “tap delay” weirdness a bit
-          touchAction: "manipulation",
+          willChange: "transform, opacity",
         }}
       >
-        {/* Scroll container */}
+        {/* Inner wrapper: NOW full width too (responsive via padding) */}
         <div
           style={{
-            maxHeight: "85vh",
-            overflowY: "auto",
-            WebkitOverflowScrolling: "touch",
-            overscrollBehavior: "contain",
+            width: "100%",
+            padding: 16,
+            paddingBottom: "calc(16px + env(safe-area-inset-bottom))",
+            boxSizing: "border-box",
           }}
         >
-          {/* Inner wrapper */}
+          {/* Header */}
           <div
             style={{
-              width: "100%",
-              padding: 16,
-              paddingBottom: "calc(16px + env(safe-area-inset-bottom))",
-              boxSizing: "border-box",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              marginBottom: 12,
             }}
           >
-            {/* Drag handle */}
-            <div
-              style={{
-                width: 44,
-                height: 5,
-                borderRadius: 999,
-                background: "#e5e5e5",
-                margin: "2px auto 12px",
-              }}
-            />
-
-            {/* Header */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                marginBottom: 12,
-              }}
-            >
-              <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
-                {title}
-              </div>
-
-              <button
-                onClick={close}
-                disabled={disabled}
-                aria-label="Close"
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: "#fff",
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  fontWeight: 900,
-                  opacity: disabled ? 0.6 : 1,
-                }}
-              >
-                ×
-              </button>
+            <div style={{ fontWeight: 900, fontSize: 16, flex: 1 }}>
+              {title}
             </div>
 
-            {children}
+            <button
+              onClick={close}
+              disabled={disabled}
+              aria-label="Close"
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 999,
+                border: "1px solid #ddd",
+                background: "#fff",
+                cursor: disabled ? "not-allowed" : "pointer",
+                fontWeight: 900,
+                opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              ×
+            </button>
           </div>
+
+          {children}
         </div>
       </div>
     </>

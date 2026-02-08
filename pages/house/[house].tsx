@@ -1,9 +1,7 @@
-// pages/house/[house].tsx
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../../lib/rooms";
-import { useCycle } from "../../lib/useCycle";
 
 type Reading = {
   room: string;
@@ -15,12 +13,6 @@ type Reading = {
 };
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
-
-const TZ = "Asia/Ho_Chi_Minh";
-
-// Your business rule: worker usually records near end of month for next cycle.
-// If date-of-month >= CYCLE_ROLLOVER_DAY, treat as next month.
-const CYCLE_ROLLOVER_DAY = 25;
 
 function latestKey(house: string) {
   return `vtpt_houseLatest_${house}`;
@@ -48,123 +40,27 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
+/* ===== monthly status helpers ===== */
+
+function monthKey(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function monthKeyFromParts(y: number, m: number) {
-  return `${y}-${pad2(m)}`;
+function isLoggedThisMonth(reading?: Reading) {
+  if (!reading?.date) return false;
+  const parsed = new Date(reading.date);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return monthKey(parsed) === monthKey(new Date());
 }
-
-function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test((s || "").trim());
-}
-
-/* ===== month key (VN timezone) ===== */
-
-function monthKeyVN(date = new Date()) {
-  try {
-    const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TZ,
-      year: "numeric",
-      month: "2-digit",
-    });
-    const parts = fmt.formatToParts(date);
-    const y = Number(parts.find((p) => p.type === "year")?.value || "");
-    const m = Number(parts.find((p) => p.type === "month")?.value || "");
-    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
-      return monthKeyFromParts(y, m);
-    }
-  } catch {
-    // ignore
-  }
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
-}
-
-function monthKeyFromDateStringVN(dateStr: string) {
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return "unknown";
-  return monthKeyVN(d);
-}
-
-function currentMonthKeyVN() {
-  return monthKeyVN(new Date());
-}
-
-/* ===== VN date parts helper ===== */
-
-function vnYMD(dateStr: string): { y: number; m: number; d: number } | null {
-  const dt = new Date(dateStr);
-  if (Number.isNaN(dt.getTime())) return null;
-
-  try {
-    const fmt = new Intl.DateTimeFormat("en-CA", {
-      timeZone: TZ,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    const parts = fmt.formatToParts(dt);
-    const y = Number(parts.find((p) => p.type === "year")?.value || "");
-    const m = Number(parts.find((p) => p.type === "month")?.value || "");
-    const d = Number(parts.find((p) => p.type === "day")?.value || "");
-    if (
-      Number.isFinite(y) &&
-      Number.isFinite(m) &&
-      Number.isFinite(d) &&
-      m >= 1 &&
-      m <= 12 &&
-      d >= 1 &&
-      d <= 31
-    ) {
-      return { y, m, d };
-    }
-  } catch {
-    // ignore
-  }
-
-  // fallback: local parse
-  const y = dt.getFullYear();
-  const m = dt.getMonth() + 1;
-  const d = dt.getDate();
-  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
-    return { y, m, d };
-  }
-  return null;
-}
-
-function nextMonthKey(key: string) {
-  if (!isMonthKey(key)) return key;
-  const [yy, mm] = key.split("-").map(Number);
-  const d = new Date(yy, (mm || 1) - 1, 1);
-  d.setMonth(d.getMonth() + 1);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
-}
-
-/**
- * Map a reading's physical date -> the BUSINESS cycle month it should count for.
- * Rule:
- * - if recorded on/after day CYCLE_ROLLOVER_DAY, treat as next month cycle
- * - else treat as same month
- */
-function cycleKeyFromReadingDate(dateStr: string): string | null {
-  const parts = vnYMD(dateStr);
-  if (!parts) return null;
-
-  const mk = monthKeyFromParts(parts.y, parts.m);
-  if (!isMonthKey(mk)) return null;
-
-  if (parts.d >= CYCLE_ROLLOVER_DAY) {
-    return nextMonthKey(mk);
-  }
-  return mk;
-}
-
-/* ===== monthly status helpers (cycle-driven) ===== */
 
 function isResolvedNote(note?: string) {
   if (!note) return false;
   return /\bresolved\b/i.test(note);
+}
+
+function hasAnyNote(reading?: Reading) {
+  const note = reading?.note?.trim();
+  return !!note;
 }
 
 function hasUnresolvedNote(reading?: Reading) {
@@ -173,50 +69,21 @@ function hasUnresolvedNote(reading?: Reading) {
   return !isResolvedNote(note);
 }
 
-/**
- * New: cycle-aware check using your real-world collection window.
- * This makes:
- * - Jan 28 reading count for Feb cycle
- * - Feb 28 reading count for Mar cycle
- */
-function isLoggedInBusinessCycle(
-  reading: Reading | undefined,
-  cycleKey: string,
-) {
-  if (!reading?.date) return false;
-
-  const ck = (cycleKey || "").trim();
-  if (!ck || !isMonthKey(ck)) return false;
-
-  const effective = cycleKeyFromReadingDate(reading.date);
-  if (!effective || !isMonthKey(effective)) return false;
-
-  return effective === ck;
-}
-
 /* =================================== */
 
 export default function HousePage() {
   const router = useRouter();
   const house = (router.query.house as string) || "";
 
-  const [mounted, setMounted] = useState(false);
   const [rooms, setRooms] = useState<string[]>([]);
   const [latestMap, setLatestMap] = useState<Record<string, Reading>>({});
   const [loading, setLoading] = useState(true);
 
   const [houseHistory, setHouseHistory] = useState<Record<string, Reading[]>>(
-    {},
+    {}
   );
 
   const [status, setStatus] = useState<string>("");
-
-  // shared cycle cache + background refresh
-  const { cycle, loading: cycleLoading, refresh: refreshCycle } = useCycle();
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (!house) return;
@@ -226,9 +93,9 @@ export default function HousePage() {
     const list = all[house] || [];
     setRooms(list);
 
-    // 2) load caches (for offline + quick paint)
+    // 2) load cached latest
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house)),
+      localStorage.getItem(latestKey(house))
     );
 
     if (cachedLatest?.data?.length) {
@@ -239,12 +106,16 @@ export default function HousePage() {
       setLatestMap({});
     }
 
+    // 2b) load cached history
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house)),
+      localStorage.getItem(historyKey(house))
     );
 
-    if (cachedHist?.data) setHouseHistory(cachedHist.data || {});
-    else setHouseHistory({});
+    if (cachedHist?.data) {
+      setHouseHistory(cachedHist.data || {});
+    } else {
+      setHouseHistory({});
+    }
 
     const latestStamp = cachedLatest?.savedAt;
     const histStamp = cachedHist?.savedAt;
@@ -253,22 +124,18 @@ export default function HousePage() {
       setStatus(
         `Cached: latest ${
           latestStamp ? timeText(latestStamp) : "—"
-        } • history ${histStamp ? timeText(histStamp) : "—"}`,
+        } • history ${histStamp ? timeText(histStamp) : "—"}`
       );
     } else {
       setStatus("No cache yet");
     }
 
-    // 3) Sync shared cycle (fast if cached)
-    void refreshCycle();
-
-    // 4) fetch fresh in background
+    // 3) fetch fresh in background
     (async () => {
       setLoading(true);
       try {
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
-          { cache: "no-store" },
+          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1.data) ? j1.data : [];
@@ -279,14 +146,13 @@ export default function HousePage() {
 
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr }),
+          JSON.stringify({ savedAt: Date.now(), data: arr })
         );
 
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house,
-          )}&limitPerRoom=24`,
-          { cache: "no-store" },
+            house
+          )}&limitPerRoom=24`
         );
         const j2 = await r2.json();
         const hist: Record<string, Reading[]> =
@@ -296,34 +162,19 @@ export default function HousePage() {
 
         localStorage.setItem(
           historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: hist }),
+          JSON.stringify({ savedAt: Date.now(), data: hist })
         );
-
-        // re-sync cycle after network calls too (in case approve happened elsewhere)
-        await refreshCycle();
 
         setStatus(`Updated (${new Date().toLocaleTimeString()})`);
       } catch {
         setStatus(`Fetch failed (using cache)`);
-        // still try to sync cycle (might fail offline)
-        await refreshCycle();
       } finally {
         setLoading(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [house]);
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
-
-  // SSR-safe label: show "…" until mounted; after that, show cached cycle if available.
-  const effectiveCycleKey = useMemo(() => {
-    if (!mounted) return "…";
-    if (cycleLoading) return "…";
-    const k = (cycle || "").trim();
-    if (k && isMonthKey(k)) return k;
-    return "…";
-  }, [mounted, cycleLoading, cycle]);
 
   return (
     <main
@@ -353,39 +204,44 @@ export default function HousePage() {
           <div style={{ fontSize: 12, opacity: 0.6 }}>
             {loading ? "Refreshing…" : status}
           </div>
-          <div style={{ fontSize: 11, opacity: 0.45, marginTop: 2 }}>
-            Cycle month: {effectiveCycleKey}
-          </div>
         </div>
       </div>
 
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
+          const loggedThisMonth = isLoggedThisMonth(latest);
 
-          const loggedInCycle =
-            mounted && effectiveCycleKey !== "…"
-              ? isLoggedInBusinessCycle(latest, effectiveCycleKey)
-              : false;
+          // Your new rules:
+          // - no log -> no icon
+          // - logged -> check
+          // - have note -> warning
+          // - logged + note -> warning (no check)
+          // - note contains "resolved" -> check
+          const showAnyIcon = loggedThisMonth;
+          const noteExistsThisMonth = loggedThisMonth && hasAnyNote(latest);
+          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
+          const resolvedNote =
+            loggedThisMonth && noteExistsThisMonth && !unresolvedNote;
 
-          const unresolvedNote = loggedInCycle && hasUnresolvedNote(latest);
-
-          const iconSrc = !loggedInCycle
+          // Pick ONE icon only (per your rules)
+          const iconSrc = !showAnyIcon
             ? null
             : unresolvedNote
-              ? "/icons/warning.png"
-              : "/icons/check.png";
+            ? "/icons/warning.png"
+            : "/icons/check.png";
 
-          const iconAlt = !loggedInCycle
+          const iconAlt = !showAnyIcon
             ? ""
             : unresolvedNote
-              ? "Has note"
-              : "Logged";
+            ? "Has note"
+            : "Logged";
 
-          const dienDisplay = loggedInCycle
+          // If not logged this month, show empty meters on house list
+          const dienDisplay = loggedThisMonth
             ? displayMeter(latest?.dien)
             : "---";
-          const nuocDisplay = loggedInCycle
+          const nuocDisplay = loggedThisMonth
             ? displayMeter(latest?.nuoc)
             : "---";
 
@@ -393,7 +249,7 @@ export default function HousePage() {
             <Link
               key={room}
               href={`/room/${encodeURIComponent(
-                room,
+                room
               )}?house=${encodeURIComponent(house)}`}
               style={{
                 display: "grid",
@@ -444,11 +300,6 @@ export default function HousePage() {
 
       <div style={{ marginTop: 14, fontSize: 12, opacity: 0.5 }}>
         History cached rooms: {Object.keys(houseHistory || {}).length}
-      </div>
-
-      <div style={{ marginTop: 8, fontSize: 11, opacity: 0.4 }}>
-        Cycle rollover day: {CYCLE_ROLLOVER_DAY} (end-of-month readings count
-        for next cycle)
       </div>
     </main>
   );

@@ -1,26 +1,19 @@
-// pages/api/meter.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
-const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN;
+const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 
-// User pins format (same as /api/auth): "1111:Masie,2222:Brother,3333:Thuan"
-const VTPT_PINS_RAW = process.env.VTPT_PINS || "";
+// Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
+const VTPT_PINS = process.env.VTPT_PINS;
 
-// Admin pins format: "0511,2222,3333" (numbers only)
-const VTPT_ADMIN_PINS = (process.env.VTPT_ADMIN_PINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-// Flexible ok type so we can return {data} OR {nextMonthKey,...} without TS drama
-type ApiOk<T = any> = {
-  ok: true;
-  data?: T;
-  message?: string;
-  [k: string]: any;
-};
+type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string };
+
+function getHeaderPin(req: NextApiRequest): string {
+  const raw = req.headers["x-vtpt-pin"];
+  const pin = Array.isArray(raw) ? raw[0] : raw;
+  return (pin || "").trim();
+}
 
 function parsePins(pinsRaw: string): Record<string, string> {
   const map: Record<string, string> = {};
@@ -43,60 +36,18 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
-// Build once per invocation (serverless) to avoid reparsing repeatedly
-function getPinsMap(): Record<string, string> {
-  return parsePins(VTPT_PINS_RAW);
-}
-
-function getPin(req: NextApiRequest): string {
-  const headerPin = req.headers["x-vtpt-pin"];
-  if (typeof headerPin === "string") return headerPin.trim();
-  if (req.body && typeof req.body.pin === "string") return req.body.pin.trim();
-  return "";
-}
-
-function getAction(req: NextApiRequest): string {
-  // Support both:
-  // - /api/meter?action=approve (query)
-  // - POST body: { action: "save" } (room page)
-  const q = String(req.query.action || "").trim();
-  const b =
-    req.body && typeof req.body.action === "string"
-      ? req.body.action.trim()
-      : "";
-  return q || b;
-}
-
-function isAdminPin(pin: string) {
-  return !!pin && VTPT_ADMIN_PINS.includes(pin);
-}
-
-function isUserPin(pin: string) {
-  if (!pin) return false;
-  // admin pin is also allowed to do normal user actions
-  if (isAdminPin(pin)) return true;
-
-  const map = getPinsMap();
-  return !!map[pin];
-}
-
-function actorForPin(pin: string): string | undefined {
-  if (!pin) return undefined;
-
-  // If admin pin is also listed in VTPT_PINS, we can show the name.
-  // If not, still allow admin actions but the actor name may be undefined.
-  const map = getPinsMap();
-  return map[pin];
-}
-
 async function fetchJson(url: string, init?: RequestInit) {
   const res = await fetch(url, init);
   const text = await res.text();
+
+  let json: any;
   try {
-    return { status: res.status, json: JSON.parse(text) };
+    json = JSON.parse(text);
   } catch {
     throw new Error(text || `Upstream error ${res.status}`);
   }
+
+  return { status: res.status, json };
 }
 
 function buildScriptUrl(params: Record<string, string>) {
@@ -106,157 +57,56 @@ function buildScriptUrl(params: Record<string, string>) {
   const url = new URL(SCRIPT_URL);
   url.searchParams.set("token", SCRIPT_TOKEN);
 
-  Object.entries(params).forEach(([k, v]) => {
-    if (v) url.searchParams.set(k, v);
-  });
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && String(v).length) {
+      url.searchParams.set(k, String(v));
+    }
+  }
 
   return url.toString();
 }
 
-function isMonthKey(s: string) {
-  return /^\d{4}-\d{2}$/.test(String(s || "").trim());
-}
-
-function monthKey(d = new Date()) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function nextMonth(key: string) {
-  const [y, m] = key.split("-").map(Number);
-  const d = new Date(y, m - 1, 1);
-  d.setMonth(d.getMonth() + 1);
-  return monthKey(d);
-}
-
-async function scriptCycleSet(month: string, actor?: string) {
-  const url = buildScriptUrl({});
-  const payload: Record<string, any> = { action: "cycleSet", month };
-
-  // Optional: include actor for audit trail if Apps Script supports it
-  if (actor) {
-    payload.actor = actor;
-    payload.by = actor;
-  }
-
-  return fetchJson(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-function normalizeForwardedBody(body: Record<string, any>) {
-  // 1) Normalize update -> save (Apps Script often only supports "save")
-  if (typeof body.action === "string" && body.action.trim() === "update") {
-    body.action = "save";
-  }
-
-  // 2) If target is present, we are editing/deleting an existing row.
-  //    In that case, NEVER send cycleMonthKey, because some upstream scripts
-  //    treat it as "create a cycle row" and will append a new row.
-  const target = body.target;
-
-  // Coerce numeric string ids ("123") into numbers so delete/edit matches upstream.
-  if (
-    target &&
-    typeof target === "object" &&
-    typeof (target as any).id === "string" &&
-    /^\d+$/.test((target as any).id.trim())
-  ) {
-    (target as any).id = Number((target as any).id.trim());
-  }
-
-  const hasTarget =
-    target &&
-    typeof target === "object" &&
-    typeof (target as any).id === "number" &&
-    Number.isFinite((target as any).id) &&
-    typeof (target as any).date === "string" &&
-    (target as any).date.trim().length > 0;
-
-  if (hasTarget) {
-    if ("cycleMonthKey" in body) delete body.cycleMonthKey;
-
-    // Safety: if date is missing, fall back to target.date so we don't create a new row
-    if (typeof body.date !== "string" || !body.date.trim()) {
-      body.date = (target as any).date;
-    }
-
-    // Ensure we forward a clean minimal target shape (avoid extra fields)
-    body.target = { id: (target as any).id, date: (target as any).date };
-  }
-
-  return body;
-}
-
-function wantsDebug(req: NextApiRequest, pin: string) {
-  // Only allow debug output if:
-  // - admin pin, AND
-  // - explicitly requested
-  const q = String(req.query.debug || "").trim();
-  const h = String(req.headers["x-vtpt-debug"] || "").trim();
-  const b =
-    req.body && typeof req.body.debug === "boolean" ? req.body.debug : false;
-
-  return isAdminPin(pin) && (q === "1" || h === "1" || b === true);
-}
-
-function sanitizeForDebug(input: any) {
-  // Make a shallow safe copy; never include secrets
-  const obj: Record<string, any> =
-    input && typeof input === "object" ? { ...input } : { value: input };
-
-  // Strip anything that could contain secrets
-  delete obj.pin;
-  delete obj.token;
-  delete obj.SCRIPT_TOKEN;
-  delete obj.scriptToken;
-
-  // If target exists, keep only id/date
-  if (obj.target && typeof obj.target === "object") {
-    obj.target = {
-      id: obj.target.id,
-      date: obj.target.date,
-    };
-  }
-
-  return obj;
+function hasFiniteNumber(x: any) {
+  return x !== null && x !== undefined && Number.isFinite(Number(x));
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ApiOk | ApiErr>,
+  res: NextApiResponse<ApiOk<any> | ApiErr>
 ) {
   try {
-    if (!SCRIPT_URL || !SCRIPT_TOKEN) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Missing SCRIPT_URL or SCRIPT_TOKEN" });
+    if (!SCRIPT_URL) {
+      return res.status(500).json({ ok: false, error: "Missing SCRIPT_URL" });
+    }
+    if (!SCRIPT_TOKEN) {
+      return res.status(500).json({ ok: false, error: "Missing SCRIPT_TOKEN" });
     }
 
-    /* =======================
-       GET
-    ======================= */
+    // =========================
+    // GET (READ)
+    // =========================
     if (req.method === "GET") {
       const action = String(req.query.action || "").trim();
-
-      if (!action) {
-        return res.status(400).json({ ok: false, error: "Missing action" });
-      }
-
-      if (action === "cycleGet") {
-        const url = buildScriptUrl({ action: "cycleGet" });
-        const { status, json } = await fetchJson(url);
-        return res.status(status).json(json);
-      }
-
-      // Only pass through known query keys to avoid Next's query shape weirdness
       const room = String(req.query.room || "").trim();
       const house = String(req.query.house || "").trim();
       const limit = req.query.limit ? String(req.query.limit) : "";
       const limitPerRoom = req.query.limitPerRoom
         ? String(req.query.limitPerRoom)
         : "";
+
+      if (!action) {
+        return res.status(400).json({ ok: false, error: "Missing action" });
+      }
+
+      const houseActions = new Set(["houseLatest", "houseHistory"]);
+      const roomActions = new Set(["latest", "history", "log"]);
+
+      if (houseActions.has(action) && !house) {
+        return res.status(400).json({ ok: false, error: "Missing house" });
+      }
+      if (roomActions.has(action) && !room) {
+        return res.status(400).json({ ok: false, error: "Missing room" });
+      }
 
       const url = buildScriptUrl({
         action,
@@ -270,133 +120,110 @@ export default async function handler(
       return res.status(status).json(json);
     }
 
-    /* =======================
-       POST
-    ======================= */
+    // =========================
+    // POST (WRITE): save / update / delete
+    // =========================
     if (req.method === "POST") {
-      const action = getAction(req);
-      const pin = getPin(req);
-      const actor = actorForPin(pin);
-      const debug = wantsDebug(req, pin);
-
-      if (!action) {
-        return res.status(400).json({ ok: false, error: "Missing action" });
+      if (!VTPT_PINS) {
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Server not configured: VTPT_PINS is missing. Writes are disabled.",
+        });
       }
 
-      // Admin-only actions
-      if (action === "approve" || action === "cycleSet") {
-        if (!isAdminPin(pin)) {
-          return res
-            .status(401)
-            .json({ ok: false, error: "Unauthorized (admin PIN required)" });
-        }
-
-        // -------- cycleSet --------
-        if (action === "cycleSet") {
-          const month = String(req.body?.month || "").trim();
-          if (!isMonthKey(month)) {
-            return res.status(400).json({
-              ok: false,
-              error: "Invalid month. Expected YYYY-MM.",
-            });
-          }
-
-          const { status, json } = await scriptCycleSet(month, actor);
-
-          if (debug) {
-            return res.status(status).json({
-              ...(json || {}),
-              debug: {
-                forwarded: sanitizeForDebug({
-                  action: "cycleSet",
-                  month,
-                  actor,
-                }),
-              },
-            });
-          }
-
-          return res.status(status).json(json);
-        }
-
-        // -------- approve (next month) --------
-        if (action === "approve") {
-          const current =
-            typeof req.body?.currentCycleKey === "string" &&
-            isMonthKey(req.body.currentCycleKey)
-              ? req.body.currentCycleKey
-              : monthKey();
-
-          const next = nextMonth(current);
-          const { status, json } = await scriptCycleSet(next, actor);
-
-          // If Apps Script failed, don't pretend success
-          if (!json?.ok || status >= 400) {
-            return res.status(status).json(json);
-          }
-
-          const out: any = {
-            ok: true,
-            nextMonthKey: next,
-            message: `Approved ✅ Cycle moved to ${next}`,
-            backend: json,
-          };
-
-          if (debug) {
-            out.debug = {
-              forwarded: sanitizeForDebug({
-                action: "cycleSet",
-                month: next,
-                actor,
-              }),
-            };
-          }
-
-          return res.status(200).json(out);
-        }
+      const pins = parsePins(VTPT_PINS);
+      if (!Object.keys(pins).length) {
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Server not configured: VTPT_PINS is empty/invalid (expected '1111:Masie,2222:Brother').",
+        });
       }
 
-      // Everything else: any valid user PIN (admin pin also allowed)
-      if (!isUserPin(pin)) {
+      const pin = getHeaderPin(req);
+      const actor = pin ? pins[pin] : undefined;
+
+      if (!actor) {
         return res
           .status(401)
           .json({ ok: false, error: "Unauthorized (bad PIN)" });
       }
 
-      // -------- pass-through write to Apps Script --------
-      // IMPORTANT: attach actor name (for logs) before forwarding
-      const forwardedBody: Record<string, any> = { ...(req.body || {}) };
+      const body = req.body || {};
+      const actionRaw = String(body.action || "save").trim();
+      const action =
+        actionRaw === "update" || actionRaw === "delete" ? actionRaw : "save";
 
-      // If the client mistakenly sends pin in body, strip it out so it never hits Sheets
-      if ("pin" in forwardedBody) delete forwardedBody.pin;
+      const roomStr = String(body.room || "").trim();
+      if (!roomStr)
+        return res.status(400).json({ ok: false, error: "Missing room" });
 
-      // Normalize risky fields before forwarding (prevents edit => append bugs)
-      normalizeForwardedBody(forwardedBody);
+      const target = body.target || undefined;
+      const targetId =
+        target && target.id !== undefined ? Number(target.id) : undefined;
+      const targetDate =
+        target && target.date !== undefined ? String(target.date).trim() : "";
 
-      // Add audit fields (Apps Script can pick whichever it uses)
-      if (actor) {
-        forwardedBody.actor = actor;
-        forwardedBody.by = actor;
+      if ((action === "update" || action === "delete") && !target) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "Missing target for update/delete" });
+      }
+      if ((action === "update" || action === "delete") && !targetDate) {
+        return res
+          .status(400)
+          .json({ ok: false, error: "Missing target.date for update/delete" });
+      }
+      if (
+        (action === "update" || action === "delete") &&
+        (targetId === undefined || !Number.isFinite(targetId))
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "Missing/invalid target.id for update/delete",
+        });
       }
 
+      if (action !== "delete") {
+        const dienProvided = hasFiniteNumber(body.dien);
+        const nuocProvided = hasFiniteNumber(body.nuoc);
+
+        if (!dienProvided && !nuocProvided) {
+          return res.status(400).json({
+            ok: false,
+            error: "Provide at least one of dien or nuoc",
+          });
+        }
+      }
+
+      const noteStr = typeof body.note === "string" ? body.note.trim() : "";
+
       const url = buildScriptUrl({});
+
+      const payload: any = {
+        action,
+        room: roomStr,
+        actor,
+      };
+
+      if (action === "delete") {
+        payload.target = { id: targetId, date: targetDate };
+      } else {
+        payload.dien = hasFiniteNumber(body.dien) ? Number(body.dien) : null;
+        payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;
+        payload.note = noteStr;
+
+        if (action === "update") {
+          payload.target = { id: targetId, date: targetDate };
+        }
+      }
+
       const { status, json } = await fetchJson(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(forwardedBody),
+        body: JSON.stringify(payload),
       });
-
-      // Debug wrapper (admin-only)
-      if (debug) {
-        return res.status(status).json({
-          ok: true,
-          upstreamStatus: status,
-          upstream: json,
-          debug: {
-            forwarded: sanitizeForDebug(forwardedBody),
-          },
-        });
-      }
 
       return res.status(status).json(json);
     }

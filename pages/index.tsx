@@ -68,10 +68,10 @@ async function fetchBackendCycleKeySafe(): Promise<string | null> {
               ? j.monthKey
               : typeof j?.current === "string"
                 ? j.current
-                : "";
+                : null;
 
-    const key = String(raw || "").trim();
-    return isMonthKey(key) ? key : null;
+    const k = String(raw || "").trim();
+    return isMonthKey(k) ? k : null;
   } catch {
     return null;
   }
@@ -104,10 +104,16 @@ export default function Home() {
   // whenever sheet opens, refresh cycle + clear inputs
   useEffect(() => {
     if (!open) return;
+
+    // IMPORTANT:
+    // refreshCycle's function identity may change between renders.
+    // If we include it in deps, this effect can re-run while typing and wipe the PIN.
     void refreshCycle();
+
     setPin("");
     setApproveMsg(null);
-  }, [open, refreshCycle]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function approveNextMonth() {
     const trimmedPin = pin.trim();
@@ -295,8 +301,15 @@ export default function Home() {
                 inputMode="numeric"
                 pattern="[0-9]*"
                 autoComplete="off"
+                enterKeyHint="done"
                 value={pin}
-                onChange={(e) => setPin(digitsOnly(e.target.value))}
+                onChange={(e) => setPin(digitsOnly(e.target.value).slice(0, 6))}
+                onPaste={(e) => {
+                  e.preventDefault();
+                  setPin(
+                    digitsOnly(e.clipboardData.getData("text")).slice(0, 6),
+                  );
+                }}
                 placeholder="PIN"
                 style={{
                   width: "100%",

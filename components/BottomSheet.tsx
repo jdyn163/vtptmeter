@@ -48,6 +48,7 @@ export default function BottomSheet({
 
   const isEnter = phase === "enter";
   const isExit = phase === "exit";
+  const isAnimating = isEnter || isExit;
 
   const close = () => {
     if (disabled) return;
@@ -87,11 +88,16 @@ export default function BottomSheet({
           maxHeight: "85vh",
           overflow: "hidden",
 
-          transform: isEnter || isExit ? "translateY(24px)" : "translateY(0)",
-          opacity: isEnter || isExit ? 0 : 1,
+          // IMPORTANT: no transform when fully open (mobile typing stability)
+          transform: isAnimating ? "translateY(24px)" : "none",
+          opacity: isAnimating ? 0 : 1,
+
           transition:
             "transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease",
-          willChange: "transform, opacity",
+          willChange: isAnimating ? "transform, opacity" : undefined,
+
+          // helps reduce iOS “tap delay” weirdness a bit
+          touchAction: "manipulation",
         }}
       >
         {/* Scroll container */}
@@ -100,6 +106,7 @@ export default function BottomSheet({
             maxHeight: "85vh",
             overflowY: "auto",
             WebkitOverflowScrolling: "touch",
+            overscrollBehavior: "contain",
           }}
         >
           {/* Inner wrapper */}

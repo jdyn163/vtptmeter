@@ -90,20 +90,6 @@ function currentMonthKeyVN() {
   return monthKeyVN(new Date());
 }
 
-/**
- * IMPORTANT FOR YOUR WORKFLOW:
- * A "cycle month key" (YYYY-MM) needs a date string that belongs to that month
- * so the UI grouping + inCycle checks work.
- *
- * We'll represent a cycle-month record as the 1st of that month at noon local time.
- * (Noon avoids timezone edge cases shifting to previous day in UTC.)
- */
-function isoForCycleMonthKey(cycleKey: string) {
-  const m = String(cycleKey || "").trim();
-  if (!isMonthKey(m)) return new Date().toISOString();
-  return `${m}-01T12:00:00`;
-}
-
 /* ===== cycle helpers (approval-driven month, with rollover day) ===== */
 
 function nextMonthKey(key: string) {
@@ -296,50 +282,17 @@ function dedupeByDayVN(list: Reading[]) {
   return deduped;
 }
 
-// -------------------- Numeric-only helpers --------------------
+// -------------------- Input helpers --------------------
+// We DO NOT sanitize onChange (to avoid mobile/desktop "blink then clear").
+// We sanitize ONLY when parsing.
 function digitsOnly(s: string) {
   return String(s ?? "").replace(/[^\d]/g, "");
 }
 
-function setNumberOnly(raw: string, setter: (v: string) => void) {
-  setter(digitsOnly(raw));
-}
-
-/**
- * Mobile-safe key filter:
- * - Only block when we are SURE it's a single-character non-digit.
- * - Mobile keyboards often emit keys like "Unidentified"/"Process", which should NOT be blocked.
- */
-function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
-  const allowed = [
-    "Backspace",
-    "Delete",
-    "Tab",
-    "Enter",
-    "Escape",
-    "ArrowLeft",
-    "ArrowRight",
-    "ArrowUp",
-    "ArrowDown",
-    "Home",
-    "End",
-  ];
-  if (allowed.includes(e.key)) return;
-  if (e.ctrlKey || e.metaKey) return;
-
-  // ✅ If key is not a single character, don't block (mobile/IME safe)
-  if (!e.key || e.key.length !== 1) return;
-
-  // ✅ Only block single-char that is NOT a digit
-  if (/^\d$/.test(e.key)) return;
-
-  e.preventDefault();
-}
-
 function parseOptionalNumberFromInput(s: string): number | null {
-  const raw = String(s ?? "").trim();
-  if (!raw.length) return null;
-  const n = Number(raw);
+  const rawDigits = digitsOnly(String(s ?? ""));
+  if (!rawDigits.length) return null;
+  const n = Number(rawDigits);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -353,14 +306,12 @@ function Field({
   label,
   value,
   onChange,
-  onKeyDown,
   onPaste,
   placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-  onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => void;
   placeholder: string;
 }) {
@@ -377,13 +328,12 @@ function Field({
         }}
       >
         <input
+          type="tel"
           inputMode="numeric"
-          pattern="[0-9]*"
           autoComplete="off"
           enterKeyHint="done"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          onKeyDown={onKeyDown}
           onPaste={onPaste}
           placeholder={placeholder}
           style={{
@@ -507,7 +457,9 @@ export default function RoomPage() {
 
       if (!histFresh) {
         const r2 = await fetch(
-          `/api/meter?action=houseHistory&house=${encodeURIComponent(house)}&limitPerRoom=24`,
+          `/api/meter?action=houseHistory&house=${encodeURIComponent(
+            house,
+          )}&limitPerRoom=24`,
           { cache: "no-store" },
         );
         const j2 = await r2.json();
@@ -673,9 +625,6 @@ export default function RoomPage() {
 
   const inCycle = mounted ? !!cycleReading : false;
 
-  const todayRow = useMemo(() => findTodayRow(history), [history]);
-  const topActionLabel = todayRow ? "Fix today" : "Add today";
-
   function openTodaySheet() {
     if (saving) return;
     setMsg(null);
@@ -701,30 +650,26 @@ export default function RoomPage() {
       return;
     }
 
-    // ✅ NEW: Prefill from current cycle reading (only within the current cycle)
-    if (cycleReading) {
-      setEditing(null);
-      setEditSource("today");
-      setDienInput(
-        typeof cycleReading.dien === "number" &&
-          Number.isFinite(cycleReading.dien)
-          ? String(cycleReading.dien)
-          : "",
-      );
-      setNuocInput(
-        typeof cycleReading.nuoc === "number" &&
-          Number.isFinite(cycleReading.nuoc)
-          ? String(cycleReading.nuoc)
-          : "",
-      );
-      setNoteInput("");
-      return;
-    }
-
+    // Add today: prefill from cycleReading ONLY if we are currently in cycle
     setEditing(null);
     setEditSource("today");
-    setDienInput("");
-    setNuocInput("");
+
+    const prefill = cycleReading && inCycle ? cycleReading : null;
+
+    setDienInput(
+      prefill &&
+        typeof prefill.dien === "number" &&
+        Number.isFinite(prefill.dien)
+        ? String(prefill.dien)
+        : "",
+    );
+    setNuocInput(
+      prefill &&
+        typeof prefill.nuoc === "number" &&
+        Number.isFinite(prefill.nuoc)
+        ? String(prefill.nuoc)
+        : "",
+    );
     setNoteInput("");
   }
 
@@ -750,14 +695,6 @@ export default function RoomPage() {
   }
 
   const canTapCard = !saving && !loadingLatest && !!room && !!house;
-
-  function onMeterCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (!canTapCard) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      openTodaySheet();
-    }
-  }
 
   function requestConfirmSave() {
     setMsg(null);
@@ -1065,10 +1002,10 @@ export default function RoomPage() {
       ? cycleReading.nuoc
       : null;
 
+  // Confirm view uses parsed digits (so if user typed spaces, it still works)
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
 
-  // ✅ FIX: show Delete whenever you're editing an existing row
   const allowDelete = !!editing;
 
   const sheetTitle =
@@ -1137,13 +1074,6 @@ export default function RoomPage() {
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
           <div
             onClick={() => canTapCard && openTodaySheet()}
-            onKeyDown={(e) => {
-              if (!canTapCard) return;
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                openTodaySheet();
-              }
-            }}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -1155,10 +1085,7 @@ export default function RoomPage() {
               cursor: canTapCard ? "pointer" : "not-allowed",
             }}
           >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>
-              Electric Meter{" "}
-              <span style={{ fontSize: 12, opacity: 0.55, marginLeft: 8 }} />
-            </div>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latestDien === null ? "— — —" : latestDien}
               <span
@@ -1176,7 +1103,6 @@ export default function RoomPage() {
 
           <div
             onClick={() => canTapCard && openTodaySheet()}
-            onKeyDown={onMeterCardKeyDown}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -1188,10 +1114,7 @@ export default function RoomPage() {
               cursor: canTapCard ? "pointer" : "not-allowed",
             }}
           >
-            <div style={{ fontWeight: 800, opacity: 0.8 }}>
-              Water Meter{" "}
-              <span style={{ fontSize: 12, opacity: 0.55, marginLeft: 8 }} />
-            </div>
+            <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
               {loadingLatest ? "…" : latestNuoc === null ? "— — —" : latestNuoc}
               <span
@@ -1403,7 +1326,13 @@ export default function RoomPage() {
       {/* Edit Sheet (Step 1) */}
       <BottomSheet
         open={showSheet}
-        title={sheetTitle}
+        title={
+          editSource === "history"
+            ? "Edit history"
+            : isEditing
+              ? "Fix today"
+              : "Add today"
+        }
         onClose={closeEditSheet}
         disabled={saving}
       >
@@ -1411,9 +1340,9 @@ export default function RoomPage() {
           <Field
             label="Điện"
             value={dienInput}
-            onChange={(raw) => setNumberOnly(raw, setDienInput)}
-            onKeyDown={blockNonNumericKeys}
+            onChange={setDienInput}
             onPaste={(e) => {
+              // allow paste, but keep it tidy
               e.preventDefault();
               setDienInput(digitsOnly(e.clipboardData.getData("text")));
             }}
@@ -1423,8 +1352,7 @@ export default function RoomPage() {
           <Field
             label="Nước"
             value={nuocInput}
-            onChange={(raw) => setNumberOnly(raw, setNuocInput)}
-            onKeyDown={blockNonNumericKeys}
+            onChange={setNuocInput}
             onPaste={(e) => {
               e.preventDefault();
               setNuocInput(digitsOnly(e.clipboardData.getData("text")));
@@ -1503,7 +1431,17 @@ export default function RoomPage() {
             )}
 
             <button
-              onClick={requestConfirmSave}
+              onClick={() => {
+                setMsg(null);
+                const dienNum = parseOptionalNumberFromInput(dienInput);
+                const nuocNum = parseOptionalNumberFromInput(nuocInput);
+                if (dienNum === null && nuocNum === null) {
+                  setMsg("Enter at least one meter value (Điện or Nước).");
+                  return;
+                }
+                setShowSheet(false);
+                setShowConfirmSheet(true);
+              }}
               disabled={saving}
               style={{
                 padding: 12,

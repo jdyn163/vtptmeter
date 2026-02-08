@@ -151,25 +151,39 @@ function normalizeForwardedBody(body: Record<string, any>) {
     body.action = "save";
   }
 
-  // 2) If target is present, we are editing an existing row.
+  // 2) If target is present, we are editing/deleting an existing row.
   //    In that case, NEVER send cycleMonthKey, because some upstream scripts
   //    treat it as "create a cycle row" and will append a new row.
   const target = body.target;
+
+  // Coerce numeric string ids ("123") into numbers so delete/edit matches upstream.
+  if (
+    target &&
+    typeof target === "object" &&
+    typeof (target as any).id === "string" &&
+    /^\d+$/.test((target as any).id.trim())
+  ) {
+    (target as any).id = Number((target as any).id.trim());
+  }
+
   const hasTarget =
     target &&
     typeof target === "object" &&
-    typeof target.id === "number" &&
-    Number.isFinite(target.id) &&
-    typeof target.date === "string" &&
-    target.date.trim().length > 0;
+    typeof (target as any).id === "number" &&
+    Number.isFinite((target as any).id) &&
+    typeof (target as any).date === "string" &&
+    (target as any).date.trim().length > 0;
 
   if (hasTarget) {
     if ("cycleMonthKey" in body) delete body.cycleMonthKey;
 
     // Safety: if date is missing, fall back to target.date so we don't create a new row
     if (typeof body.date !== "string" || !body.date.trim()) {
-      body.date = target.date;
+      body.date = (target as any).date;
     }
+
+    // Ensure we forward a clean minimal target shape (avoid extra fields)
+    body.target = { id: (target as any).id, date: (target as any).date };
   }
 
   return body;

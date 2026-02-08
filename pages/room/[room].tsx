@@ -268,9 +268,8 @@ function dedupeByDayVN(list: Reading[]) {
 
     if (prevTimeOk && currTimeOk) {
       if (tCurr > tPrev) bestByDay.set(k, r);
-      else if (tCurr === tPrev && (r.id ?? 0) > (prev.id ?? 0)) {
+      else if (tCurr === tPrev && (r.id ?? 0) > (prev.id ?? 0))
         bestByDay.set(k, r);
-      }
       continue;
     }
 
@@ -306,6 +305,11 @@ function setNumberOnly(raw: string, setter: (v: string) => void) {
   setter(digitsOnly(raw));
 }
 
+/**
+ * Mobile-safe key filter:
+ * - Only block when we are SURE it's a single-character non-digit.
+ * - Mobile keyboards often emit keys like "Unidentified"/"Process", which should NOT be blocked.
+ */
 function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
   const allowed = [
     "Backspace",
@@ -322,7 +326,13 @@ function blockNonNumericKeys(e: React.KeyboardEvent<HTMLInputElement>) {
   ];
   if (allowed.includes(e.key)) return;
   if (e.ctrlKey || e.metaKey) return;
+
+  // ✅ If key is not a single character, don't block (mobile/IME safe)
+  if (!e.key || e.key.length !== 1) return;
+
+  // ✅ Only block single-char that is NOT a digit
   if (/^\d$/.test(e.key)) return;
+
   e.preventDefault();
 }
 
@@ -331,50 +341,6 @@ function parseOptionalNumberFromInput(s: string): number | null {
   if (!raw.length) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
-}
-
-function toNumOrNull(v: any): number | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const s = v.trim();
-    if (!s) return null;
-    if (/^-?\d+(\.\d+)?$/.test(s)) {
-      const n = Number(s);
-      return Number.isFinite(n) ? n : null;
-    }
-  }
-  return null;
-}
-
-function normalizeReading(raw: any): Reading | null {
-  if (!raw || typeof raw !== "object") return null;
-
-  const room = typeof raw.room === "string" ? raw.room : "";
-  const date = typeof raw.date === "string" ? raw.date : "";
-
-  const id =
-    typeof raw.id === "number"
-      ? raw.id
-      : typeof raw.id === "string" && /^\d+$/.test(raw.id.trim())
-        ? Number(raw.id.trim())
-        : 0;
-
-  return {
-    room,
-    date,
-    id,
-    dien: toNumOrNull(raw.dien),
-    nuoc: toNumOrNull(raw.nuoc),
-    note: typeof raw.note === "string" ? raw.note : undefined,
-  };
-}
-
-function normalizeReadingList(input: any): Reading[] {
-  const arr = Array.isArray(input) ? input : [];
-  return arr
-    .map((x) => normalizeReading(x))
-    .filter((x): x is Reading => !!x && !!x.room && !!x.date);
 }
 
 function getReadingValue(row: Reading, tab: "dien" | "nuoc"): number | null {
@@ -493,13 +459,8 @@ export default function RoomPage() {
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
       localStorage.getItem(latestKey(house)),
     );
-
-    const foundLatestRaw =
-      cachedLatest?.data?.find((x: any) => x?.room === room) || null;
-    const foundLatest = foundLatestRaw
-      ? normalizeReading(foundLatestRaw)
-      : null;
-
+    const foundLatest =
+      cachedLatest?.data?.find((x) => x.room === room) || null;
     setLatest(foundLatest);
     setLoadingLatest(false);
 
@@ -508,11 +469,7 @@ export default function RoomPage() {
       localStorage.getItem(historyKey(house)),
     );
     const list = cachedHist?.data?.[room];
-
-    const safeList = dedupeByDayVN(
-      normalizeReadingList(Array.isArray(list) ? list : []),
-    );
-
+    const safeList = dedupeByDayVN(Array.isArray(list) ? list : []);
     setHistory(safeList);
     setLoadingHistory(false);
   }
@@ -541,7 +498,7 @@ export default function RoomPage() {
           { cache: "no-store" },
         );
         const j1 = await r1.json();
-        const arr: Reading[] = normalizeReadingList(j1?.data);
+        const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
         localStorage.setItem(
           latestKey(house),
           JSON.stringify({ savedAt: Date.now(), data: arr }),
@@ -550,19 +507,12 @@ export default function RoomPage() {
 
       if (!histFresh) {
         const r2 = await fetch(
-          `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house,
-          )}&limitPerRoom=24`,
+          `/api/meter?action=houseHistory&house=${encodeURIComponent(house)}&limitPerRoom=24`,
           { cache: "no-store" },
         );
         const j2 = await r2.json();
-        const raw: any = j2 && j2.ok && j2.data ? j2.data : {};
-
-        const data: Record<string, Reading[]> = {};
-        Object.keys(raw || {}).forEach((k) => {
-          data[k] = normalizeReadingList(raw[k]);
-        });
-
+        const data: Record<string, Reading[]> =
+          j2 && j2.ok && j2.data ? j2.data : {};
         localStorage.setItem(
           historyKey(house),
           JSON.stringify({ savedAt: Date.now(), data }),
@@ -583,14 +533,9 @@ export default function RoomPage() {
         { cache: "no-store" },
       );
       const latestJson = await latestRes.json();
-
-      const latestDataRaw: any = latestJson?.data || null;
-      const latestData: Reading | null = latestDataRaw
-        ? normalizeReading(latestDataRaw)
-        : null;
+      const latestData: Reading | null = latestJson?.data || null;
 
       setLatest(latestData);
-
       if (latestData && house) upsertHouseLatestCache(house, latestData);
 
       if (latestData && house) {
@@ -638,14 +583,9 @@ export default function RoomPage() {
 
   function sortNewestFirst(list: Reading[]) {
     const next = Array.isArray(list) ? list.slice() : [];
-    next.sort((a, b) => {
-      const da = new Date(a.date).getTime();
-      const db = new Date(b.date).getTime();
-      if (isNaN(da) && isNaN(db)) return 0;
-      if (isNaN(da)) return 1;
-      if (isNaN(db)) return -1;
-      return db - da;
-    });
+    next.sort(
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+    );
     return next;
   }
 
@@ -718,8 +658,7 @@ export default function RoomPage() {
     if (cycleLoading) return "…";
     const k = String(cycle || "").trim();
     if (k && isMonthKey(k)) return k;
-    // fallback: never show "…" forever on client; use VN month if cycle unavailable
-    return currentMonthKeyVN();
+    return "…";
   }, [mounted, cycleLoading, cycle]);
 
   const cycleReading = useMemo(() => {
@@ -759,13 +698,34 @@ export default function RoomPage() {
           : "",
       );
       setNoteInput(String(t.note ?? ""));
-    } else {
+      return;
+    }
+
+    // ✅ NEW: Prefill from current cycle reading (only within the current cycle)
+    if (cycleReading) {
       setEditing(null);
       setEditSource("today");
-      setDienInput("");
-      setNuocInput("");
+      setDienInput(
+        typeof cycleReading.dien === "number" &&
+          Number.isFinite(cycleReading.dien)
+          ? String(cycleReading.dien)
+          : "",
+      );
+      setNuocInput(
+        typeof cycleReading.nuoc === "number" &&
+          Number.isFinite(cycleReading.nuoc)
+          ? String(cycleReading.nuoc)
+          : "",
+      );
       setNoteInput("");
+      return;
     }
+
+    setEditing(null);
+    setEditSource("today");
+    setDienInput("");
+    setNuocInput("");
+    setNoteInput("");
   }
 
   function openEditRow(r: Reading) {
@@ -789,9 +749,7 @@ export default function RoomPage() {
     setNoteInput(String(r.note ?? ""));
   }
 
-  // ✅ FIX: only block taps while actually saving.
-  // LoadingLatest should NOT block editing again (it creates the “blocked” cursor feeling).
-  const canTapCard = !saving && !!room && !!house;
+  const canTapCard = !saving && !loadingLatest && !!room && !!house;
 
   function onMeterCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (!canTapCard) return;
@@ -838,8 +796,6 @@ export default function RoomPage() {
 
     const willUpdate = !!target;
 
-    // editing existing row: keep original date
-    // creating "today" row: use nowISO
     const effectiveDate = willUpdate ? editing!.date : nowISO();
 
     const optimistic: Reading = {
@@ -851,7 +807,6 @@ export default function RoomPage() {
       note: noteInput.trim(),
     };
 
-    // Optimistic UI write (cache + state) first
     if (house) {
       if (willUpdate && target) {
         setHistory((prev) => {
@@ -901,6 +856,27 @@ export default function RoomPage() {
       }
 
       if (willUpdate && target) {
+        const delRes = await fetch("/api/meter", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-vtpt-pin": pin,
+          },
+          body: JSON.stringify({
+            action: "delete",
+            room,
+            target,
+          }),
+        });
+
+        const delJson = await delRes.json();
+        if (!delJson.ok) {
+          setMsg(delJson.error || "Delete (edit step 1) failed.");
+          setSaving(false);
+          await refreshLatestFromNetwork();
+          return;
+        }
+
         const saveRes = await fetch("/api/meter", {
           method: "POST",
           headers: {
@@ -914,13 +890,12 @@ export default function RoomPage() {
             nuoc: nuocNum,
             note: noteInput.trim(),
             date: effectiveDate,
-            target,
           }),
         });
 
         const saveJson = await saveRes.json();
         if (!saveJson.ok) {
-          setMsg(saveJson.error || "Save (edit) failed.");
+          setMsg(saveJson.error || "Save (edit step 2) failed.");
           setSaving(false);
           await refreshLatestFromNetwork();
           return;
@@ -952,14 +927,11 @@ export default function RoomPage() {
         }
       }
 
-      // ✅ UX FIX: unlock UI immediately after successful save.
-      // Refreshes can happen in the background without blocking taps.
-      setSaving(false);
+      await refreshLatestFromNetwork();
+      if (tab === "log") await refreshLogFromNetwork();
+      await refreshCycle();
 
-      // background sync (don’t block UI)
-      void refreshLatestFromNetwork();
-      if (tab === "log") void refreshLogFromNetwork();
-      void refreshCycle();
+      setSaving(false);
     } catch (err: any) {
       setMsg(String(err));
       setSaving(false);
@@ -1019,11 +991,11 @@ export default function RoomPage() {
         return;
       }
 
-      // unlock fast, refresh in background
+      await refreshLatestFromNetwork();
+      if (tab === "log") await refreshLogFromNetwork();
+      await refreshCycle();
+
       setSaving(false);
-      void refreshLatestFromNetwork();
-      if (tab === "log") void refreshLogFromNetwork();
-      void refreshCycle();
     } catch (err: any) {
       setMsg(String(err));
       setSaving(false);
@@ -1096,6 +1068,7 @@ export default function RoomPage() {
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
 
+  // ✅ FIX: show Delete whenever you're editing an existing row
   const allowDelete = !!editing;
 
   const sheetTitle =
@@ -1180,7 +1153,6 @@ export default function RoomPage() {
               borderRadius: 14,
               padding: 16,
               cursor: canTapCard ? "pointer" : "not-allowed",
-              opacity: saving ? 0.85 : 1,
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>
@@ -1214,7 +1186,6 @@ export default function RoomPage() {
               borderRadius: 14,
               padding: 16,
               cursor: canTapCard ? "pointer" : "not-allowed",
-              opacity: saving ? 0.85 : 1,
             }}
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>
@@ -1415,8 +1386,7 @@ export default function RoomPage() {
                     padding: 12,
                     borderBottom: "1px solid #f2f2f2",
                     alignItems: "center",
-                    cursor: saving ? "not-allowed" : "pointer",
-                    opacity: saving ? 0.75 : 1,
+                    cursor: "pointer",
                   }}
                 >
                   <div style={{ fontWeight: 800 }}>{r.dateText}</div>

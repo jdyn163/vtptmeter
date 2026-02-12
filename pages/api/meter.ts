@@ -6,7 +6,7 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
-// Admin PIN list: "1111,9999" (pins only)
+// Admin PIN list (same format): "1111:Masie"
 const VTPT_ADMIN_PINS = process.env.VTPT_ADMIN_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
@@ -39,25 +39,12 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
-function parseAdminPins(raw?: string): Set<string> {
-  const out = new Set<string>();
-  const s = String(raw || "").trim();
-  if (!s) return out;
-
-  s.split(",")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .forEach((pin) => out.add(pin));
-
-  return out;
-}
-
 /**
  * =========================
  * In-memory cache (server-side)
  * =========================
  * - Only caches GETs.
- * - Any successful POST clears cache.
+ * - Any successful POST clears cache (so UI can see fresh data).
  */
 type CacheEntry = { exp: number; status: number; json: any };
 const memCache: Map<string, CacheEntry> =
@@ -98,6 +85,8 @@ function ttlForAction(action: string) {
       return 30_000; // 30s
     case "houseCycleLatest":
       return 10_000; // 10s
+    case "whoami":
+      return 0; // never cache auth result
     case "latest":
     case "history":
     case "log":
@@ -108,7 +97,7 @@ function ttlForAction(action: string) {
     case "cyclesGet":
       return 8_000; // 8s
     default:
-      return 0; // no cache
+      return 0;
   }
 }
 
@@ -119,7 +108,7 @@ function ttlForAction(action: string) {
  */
 async function fetchJson(url: string, init?: RequestInit) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), 12_000); // 12s safety
 
   try {
     const res = await fetch(url, {
@@ -185,6 +174,9 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
+  const adminPinsMap = VTPT_ADMIN_PINS ? parsePins(VTPT_ADMIN_PINS) : {};
+  const adminPins = new Set(Object.keys(adminPinsMap));
+
   const pin = getHeaderPin(req);
   const actor = pin ? pins[pin] : undefined;
 
@@ -196,25 +188,9 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
-  const admins = parseAdminPins(VTPT_ADMIN_PINS);
-  const isAdmin = pin ? admins.has(pin) : false;
+  const isAdmin = adminPins.has(pin);
 
-  return { ok: true as const, actor, isAdmin, pin };
-}
-
-function requireAdmin(req: NextApiRequest) {
-  const auth = requirePinActor(req);
-  if (!auth.ok) return auth;
-
-  if (!auth.isAdmin) {
-    return {
-      ok: false as const,
-      status: 403,
-      error: "Forbidden (admin only)",
-    };
-  }
-
-  return auth;
+  return { ok: true as const, actor, isAdmin, pin, adminCount: adminPins.size };
 }
 
 function mapAction(actionRaw: string) {
@@ -262,18 +238,6 @@ export default async function handler(
     if (req.method === "GET") {
       const action = mapAction(String(req.query.action || "").trim());
 
-      // Optional: client can ask who they are (admin/user)
-      if (action === "whoami") {
-        const auth = requirePinActor(req);
-        if (!auth.ok) {
-          return res.status(auth.status).json({ ok: false, error: auth.error });
-        }
-        return res.status(200).json({
-          ok: true as const,
-          data: { actor: auth.actor, isAdmin: auth.isAdmin },
-        });
-      }
-
       const room = String(req.query.room || "").trim();
       const house = String(req.query.house || "").trim();
 
@@ -292,7 +256,36 @@ export default async function handler(
         return res.status(400).json({ ok: false, error: "Missing action" });
       }
 
-      // cyclesGet
+      // ✅ whoami: tells UI whether this PIN is admin or user
+      if (action === "whoami") {
+        const auth = requirePinActor(req);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+
+        // Keep it useful but not leaky:
+        // - role
+        // - actor name
+        // - whether admin pins are configured (count)
+        const out: ApiOk<{
+          actor: string;
+          role: "admin" | "user";
+          adminPinsConfigured: boolean;
+          adminPinsCount: number;
+        }> = {
+          ok: true,
+          data: {
+            actor: auth.actor,
+            role: auth.isAdmin ? "admin" : "user",
+            adminPinsConfigured: auth.adminCount > 0,
+            adminPinsCount: auth.adminCount,
+          },
+        };
+
+        return res.status(200).json(out);
+      }
+
+      // ✅ cyclesGet (unique cycles that exist in the sheet data)
       if (action === "cyclesGet") {
         const url = buildScriptUrl({ action: "cyclesGet" });
 
@@ -306,9 +299,7 @@ export default async function handler(
 
         if (json && json.ok) {
           const cycles = normalizeCyclesList(json.data ?? json);
-
-          // ✅ IMPORTANT: ok must be literal true for ApiOk<T>
-          const out: ApiOk<string[]> = { ok: true as const, data: cycles };
+          const out: ApiOk<string[]> = { ok: true, data: cycles };
 
           if (ttl > 0) cacheSet(cacheKeyForUrl(url), status, out, ttl);
           return res.status(status).json(out);
@@ -376,11 +367,16 @@ export default async function handler(
       const body = req.body || {};
       const actionRaw = String(body.action || "save").trim();
 
-      // cycleSet should be admin-only (approve)
+      // cycleSet should be ADMIN-only
       if (actionRaw === "cycleSet") {
-        const auth = requireAdmin(req);
+        const auth = requirePinActor(req);
         if (!auth.ok) {
           return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+        if (!auth.isAdmin) {
+          return res
+            .status(403)
+            .json({ ok: false, error: "Forbidden (admin PIN required)" });
         }
 
         const month = String(body.month || "").trim();

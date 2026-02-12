@@ -1,4 +1,3 @@
-// pages/api/meter.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
@@ -7,7 +6,7 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
-// Admin PIN list: "1111,9999"
+// Admin PIN list: "1111,9999" (pins only)
 const VTPT_ADMIN_PINS = process.env.VTPT_ADMIN_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
@@ -41,25 +40,24 @@ function parsePins(pinsRaw: string): Record<string, string> {
 }
 
 function parseAdminPins(raw?: string): Set<string> {
-  const set = new Set<string>();
-  if (!raw) return set;
-  raw
-    .split(",")
-    .map((s) => s.trim())
+  const out = new Set<string>();
+  const s = String(raw || "").trim();
+  if (!s) return out;
+
+  s.split(",")
+    .map((x) => x.trim())
     .filter(Boolean)
-    .forEach((pin) => set.add(pin));
-  return set;
+    .forEach((pin) => out.add(pin));
+
+  return out;
 }
 
 /**
  * =========================
  * In-memory cache (server-side)
  * =========================
- * Goal: make the app feel snappy by deduping repeated GET calls that happen
- * during refresh/navigation (especially on mobile).
- *
  * - Only caches GETs.
- * - Any successful POST clears cache (so UI can see fresh data).
+ * - Any successful POST clears cache.
  */
 type CacheEntry = { exp: number; status: number; json: any };
 const memCache: Map<string, CacheEntry> =
@@ -95,8 +93,6 @@ function cacheKeyForUrl(url: string) {
 }
 
 function ttlForAction(action: string) {
-  // Tune for “feels fast” without staying stale too long.
-  // Cycle changes only on approve -> can be longer.
   switch (action) {
     case "cycleGet":
       return 30_000; // 30s
@@ -123,7 +119,7 @@ function ttlForAction(action: string) {
  */
 async function fetchJson(url: string, init?: RequestInit) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000); // 12s safety
+  const timeout = setTimeout(() => controller.abort(), 12_000);
 
   try {
     const res = await fetch(url, {
@@ -200,16 +196,30 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
-  const adminSet = parseAdminPins(VTPT_ADMIN_PINS);
-  const isAdmin = adminSet.has(pin);
+  const admins = parseAdminPins(VTPT_ADMIN_PINS);
+  const isAdmin = pin ? admins.has(pin) : false;
 
-  return { ok: true as const, actor, isAdmin };
+  return { ok: true as const, actor, isAdmin, pin };
+}
+
+function requireAdmin(req: NextApiRequest) {
+  const auth = requirePinActor(req);
+  if (!auth.ok) return auth;
+
+  if (!auth.isAdmin) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: "Forbidden (admin only)",
+    };
+  }
+
+  return auth;
 }
 
 function mapAction(actionRaw: string) {
   const a = String(actionRaw || "").trim();
 
-  // Backward compatibility aliases (UI or old links might call these)
   const alias: Record<string, string> = {
     houseLatestCycle: "houseCycleLatest",
     houseHistoryCycle: "houseHistory",
@@ -219,10 +229,6 @@ function mapAction(actionRaw: string) {
 }
 
 function normalizeCyclesList(input: any): string[] {
-  // Accept common shapes:
-  // - ["2026-01","2026-02"]
-  // - { cycles: [...] }
-  // - { data: [...] }
   let arr: any[] = [];
   if (Array.isArray(input)) arr = input;
   else if (input && Array.isArray((input as any).cycles))
@@ -256,6 +262,18 @@ export default async function handler(
     if (req.method === "GET") {
       const action = mapAction(String(req.query.action || "").trim());
 
+      // Optional: client can ask who they are (admin/user)
+      if (action === "whoami") {
+        const auth = requirePinActor(req);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+        return res.status(200).json({
+          ok: true as const,
+          data: { actor: auth.actor, isAdmin: auth.isAdmin },
+        });
+      }
+
       const room = String(req.query.room || "").trim();
       const house = String(req.query.house || "").trim();
 
@@ -264,9 +282,6 @@ export default async function handler(
         ? String(req.query.limitPerRoom)
         : "";
 
-      // cycle param naming:
-      // - Apps Script uses "cycle"
-      // - some callers may send "month"
       const cycle = req.query.cycle
         ? String(req.query.cycle).trim()
         : req.query.month
@@ -277,23 +292,10 @@ export default async function handler(
         return res.status(400).json({ ok: false, error: "Missing action" });
       }
 
-      // ✅ whoami (lets UI know actor + isAdmin)
-      if (action === "whoami") {
-        const auth = requirePinActor(req);
-        if (!auth.ok) {
-          return res.status(auth.status).json({ ok: false, error: auth.error });
-        }
-        return res.status(200).json({
-          ok: true,
-          data: { actor: auth.actor, isAdmin: auth.isAdmin },
-        });
-      }
-
-      // ✅ cyclesGet (unique cycles that exist in the sheet data)
+      // cyclesGet
       if (action === "cyclesGet") {
         const url = buildScriptUrl({ action: "cyclesGet" });
 
-        // server mem cache
         const ttl = ttlForAction(action);
         if (ttl > 0) {
           const hit = cacheGet(cacheKeyForUrl(url));
@@ -304,7 +306,9 @@ export default async function handler(
 
         if (json && json.ok) {
           const cycles = normalizeCyclesList(json.data ?? json);
-          const out = { ok: true, data: cycles };
+
+          // ✅ IMPORTANT: ok must be literal true for ApiOk<T>
+          const out: ApiOk<string[]> = { ok: true as const, data: cycles };
 
           if (ttl > 0) cacheSet(cacheKeyForUrl(url), status, out, ttl);
           return res.status(status).json(out);
@@ -334,7 +338,6 @@ export default async function handler(
         return res.status(400).json({ ok: false, error: "Missing room" });
       }
 
-      // Only validate cycle if it exists (some actions don't need it)
       if ((action === "historyByCycle" || action === "latestCycle") && cycle) {
         if (!isMonthKey(cycle)) {
           return res.status(400).json({
@@ -350,10 +353,9 @@ export default async function handler(
         house,
         limit,
         limitPerRoom,
-        cycle, // Apps Script expects "cycle"
+        cycle,
       });
 
-      // server mem cache
       const ttl = ttlForAction(action);
       if (ttl > 0) {
         const hit = cacheGet(cacheKeyForUrl(url));
@@ -374,13 +376,11 @@ export default async function handler(
       const body = req.body || {};
       const actionRaw = String(body.action || "save").trim();
 
+      // cycleSet should be admin-only (approve)
       if (actionRaw === "cycleSet") {
-        const auth = requirePinActor(req);
+        const auth = requireAdmin(req);
         if (!auth.ok) {
           return res.status(auth.status).json({ ok: false, error: auth.error });
-        }
-        if (!auth.isAdmin) {
-          return res.status(403).json({ ok: false, error: "Admin only" });
         }
 
         const month = String(body.month || "").trim();
@@ -403,7 +403,6 @@ export default async function handler(
           }),
         });
 
-        // any write should invalidate read cache
         if (json && json.ok) cacheClearAll();
 
         return res.status(status).json(json);
@@ -461,7 +460,6 @@ export default async function handler(
 
       const noteStr = typeof body.note === "string" ? body.note.trim() : "";
 
-      // cycle is OPTIONAL (script stamps for SAVE; UPDATE keeps original row cycle)
       const cycle = typeof body.cycle === "string" ? body.cycle.trim() : "";
       if (cycle && !isMonthKey(cycle)) {
         return res.status(400).json({
@@ -498,7 +496,6 @@ export default async function handler(
         body: JSON.stringify(payload),
       });
 
-      // any successful write should invalidate read cache
       if (json && json.ok) cacheClearAll();
 
       return res.status(status).json(json);

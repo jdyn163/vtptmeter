@@ -4,7 +4,9 @@ import type { NextApiRequest, NextApiResponse } from "next";
 // Format: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
-type Ok = { ok: true; actor: string };
+type Role = "admin" | "user";
+
+type Ok = { ok: true; actor: string; role: Role; isAdmin: boolean };
 type Err = { ok: false; error: string };
 
 function parsePins(pinsRaw: string): Record<string, string> {
@@ -29,9 +31,19 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
+function isAdminActor(actor: string) {
+  // Keep this strict + predictable.
+  // If you later want multiple admins, we can switch to env VTPT_ADMINS.
+  return (
+    String(actor || "")
+      .trim()
+      .toLowerCase() === "masie"
+  );
+}
+
 export default function handler(
   req: NextApiRequest,
-  res: NextApiResponse<Ok | Err>
+  res: NextApiResponse<Ok | Err>,
 ) {
   try {
     if (req.method !== "POST") {
@@ -61,7 +73,10 @@ export default function handler(
       return res.status(401).json({ ok: false, error: "Wrong PIN" });
     }
 
-    return res.status(200).json({ ok: true, actor });
+    const admin = isAdminActor(actor);
+    const role: Role = admin ? "admin" : "user";
+
+    return res.status(200).json({ ok: true, actor, role, isAdmin: admin });
   } catch (err: any) {
     return res
       .status(500)

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getRoomsByHouse, RoomsByHouse } from "../../lib/rooms";
 
 type Reading = {
@@ -10,16 +10,18 @@ type Reading = {
   nuoc: number | null;
   id: number;
   note?: string;
+  cycle?: string; // from sheet "Cycle" column
 };
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
 function latestKey(house: string) {
+  // cache for "cycle latest" list per room
   return `vtpt_houseLatest_${house}`;
 }
 
-function historyKey(house: string) {
-  return `vtpt_houseHistory_${house}`;
+function cycleKey() {
+  return `vtpt_cycleMonth`;
 }
 
 function safeJsonParse<T>(s: string | null): T | null {
@@ -40,36 +42,42 @@ function displayMeter(v: number | null | undefined) {
   return v === null || v === undefined ? "---" : String(v);
 }
 
-/* ===== monthly status helpers ===== */
-
-function monthKey(d: Date) {
+/* ===== legacy fallback (only for old rows missing cycle) ===== */
+function monthKeyFromDateString(dateStr: string) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "unknown";
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function isLoggedThisMonth(reading?: Reading) {
-  if (!reading?.date) return false;
-  const parsed = new Date(reading.date);
-  if (Number.isNaN(parsed.getTime())) return false;
-  return monthKey(parsed) === monthKey(new Date());
+function isRowInCycle(
+  row: Reading | undefined | null,
+  cycleMonth: string | null,
+) {
+  if (!row || !cycleMonth) return false;
+
+  const rowCycle = String(row.cycle || "").trim();
+  if (rowCycle) return rowCycle === cycleMonth;
+
+  // fallback for legacy rows (Cycle blank): infer from Date month
+  const mk = monthKeyFromDateString(row.date);
+  return mk === cycleMonth;
 }
 
+/* ===== note helpers ===== */
 function isResolvedNote(note?: string) {
   if (!note) return false;
   return /\bresolved\b/i.test(note);
 }
-
 function hasAnyNote(reading?: Reading) {
   const note = reading?.note?.trim();
   return !!note;
 }
-
 function hasUnresolvedNote(reading?: Reading) {
   const note = reading?.note?.trim();
   if (!note) return false;
   return !isResolvedNote(note);
 }
-
-/* =================================== */
+/* ======================= */
 
 export default function HousePage() {
   const router = useRouter();
@@ -77,26 +85,36 @@ export default function HousePage() {
 
   const [rooms, setRooms] = useState<string[]>([]);
   const [latestMap, setLatestMap] = useState<Record<string, Reading>>({});
-  const [loading, setLoading] = useState(true);
 
-  const [houseHistory, setHouseHistory] = useState<Record<string, Reading[]>>(
-    {}
-  );
+  const [cycleMonth, setCycleMonth] = useState<string | null>(null);
 
+  const [loading, setLoading] = useState(true); // first paint only
+  const [refreshing, setRefreshing] = useState(false); // background refresh
   const [status, setStatus] = useState<string>("");
+
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!house) return;
 
-    // 1) build rooms list
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    // 1) rooms list
     const all: RoomsByHouse = getRoomsByHouse();
     const list = all[house] || [];
     setRooms(list);
 
-    // 2) load cached latest
-    const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+    // 2) load caches immediately
+    const cachedCycle = safeJsonParse<CacheEnvelope<string>>(
+      localStorage.getItem(cycleKey()),
     );
+    const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
+      localStorage.getItem(latestKey(house)),
+    );
+
+    if (cachedCycle?.data) setCycleMonth(String(cachedCycle.data));
 
     if (cachedLatest?.data?.length) {
       const m: Record<string, Reading> = {};
@@ -106,39 +124,50 @@ export default function HousePage() {
       setLatestMap({});
     }
 
-    // 2b) load cached history
-    const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
-    );
-
-    if (cachedHist?.data) {
-      setHouseHistory(cachedHist.data || {});
-    } else {
-      setHouseHistory({});
-    }
-
+    const cycleText = cachedCycle?.data
+      ? `Cycle ${cachedCycle.data}`
+      : "Cycle —";
     const latestStamp = cachedLatest?.savedAt;
-    const histStamp = cachedHist?.savedAt;
 
-    if (latestStamp || histStamp) {
+    if (latestStamp || cachedCycle?.savedAt) {
       setStatus(
-        `Cached: latest ${
-          latestStamp ? timeText(latestStamp) : "—"
-        } • history ${histStamp ? timeText(histStamp) : "—"}`
+        `${cycleText} • Cached: latest ${latestStamp ? timeText(latestStamp) : "—"}`,
       );
     } else {
-      setStatus("No cache yet");
+      setStatus(`${cycleText} • No cache yet`);
     }
 
-    // 3) fetch fresh in background
+    // first paint: if no cache at all, show "loading"
+    const hasAnyCache = !!(cachedCycle?.data || cachedLatest?.data?.length);
+    setLoading(!hasAnyCache);
+
+    // 3) background refresh (FAST: only cycleGet + houseCycleLatest)
     (async () => {
-      setLoading(true);
+      setRefreshing(true);
+
       try {
+        // cycle first
+        const c = await fetch(`/api/meter?action=cycleGet`, {
+          signal: ac.signal,
+        });
+        const cj = await c.json();
+        const cm = cj && cj.ok && typeof cj.data === "string" ? cj.data : null;
+
+        if (cm) {
+          setCycleMonth(cm);
+          localStorage.setItem(
+            cycleKey(),
+            JSON.stringify({ savedAt: Date.now(), data: cm }),
+          );
+        }
+
+        // cycle-latest per room (includes note)
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
+          `/api/meter?action=houseCycleLatest&house=${encodeURIComponent(house)}`,
+          { signal: ac.signal },
         );
         const j1 = await r1.json();
-        const arr: Reading[] = Array.isArray(j1.data) ? j1.data : [];
+        const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
 
         const m: Record<string, Reading> = {};
         arr.forEach((x) => (m[x.room] = x));
@@ -146,32 +175,30 @@ export default function HousePage() {
 
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr })
+          JSON.stringify({ savedAt: Date.now(), data: arr }),
         );
 
-        const r2 = await fetch(
-          `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house
-          )}&limitPerRoom=24`
+        const cycleLabel = cm
+          ? `Cycle ${cm}`
+          : cycleMonth
+            ? `Cycle ${cycleMonth}`
+            : "Cycle —";
+        setStatus(
+          `${cycleLabel} • Updated (${new Date().toLocaleTimeString()})`,
         );
-        const j2 = await r2.json();
-        const hist: Record<string, Reading[]> =
-          j2 && j2.ok && j2.data ? j2.data : {};
-
-        setHouseHistory(hist);
-
-        localStorage.setItem(
-          historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: hist })
-        );
-
-        setStatus(`Updated (${new Date().toLocaleTimeString()})`);
       } catch {
-        setStatus(`Fetch failed (using cache)`);
+        const cycleLabel = cycleMonth ? `Cycle ${cycleMonth}` : "Cycle —";
+        setStatus(`${cycleLabel} • Fetch failed (using cache)`);
       } finally {
         setLoading(false);
+        setRefreshing(false);
       }
     })();
+
+    return () => {
+      ac.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [house]);
 
   const title = useMemo(() => (house ? `House ${house}` : "House"), [house]);
@@ -202,7 +229,10 @@ export default function HousePage() {
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 20, fontWeight: 900 }}>{title}</div>
           <div style={{ fontSize: 12, opacity: 0.6 }}>
-            {loading ? "Refreshing…" : status}
+            {loading ? "Loading…" : status}
+            {refreshing && (
+              <span style={{ marginLeft: 6, opacity: 0.6 }}>(refresh…)</span>
+            )}
           </div>
         </div>
       </div>
@@ -210,47 +240,42 @@ export default function HousePage() {
       <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
         {rooms.map((room) => {
           const latest = latestMap[room];
-          const loggedThisMonth = isLoggedThisMonth(latest);
 
-          // Your new rules:
-          // - no log -> no icon
-          // - logged -> check
-          // - have note -> warning
-          // - logged + note -> warning (no check)
-          // - note contains "resolved" -> check
-          const showAnyIcon = loggedThisMonth;
-          const noteExistsThisMonth = loggedThisMonth && hasAnyNote(latest);
-          const unresolvedNote = loggedThisMonth && hasUnresolvedNote(latest);
-          const resolvedNote =
-            loggedThisMonth && noteExistsThisMonth && !unresolvedNote;
+          const loggedThisCycle = isRowInCycle(latest, cycleMonth);
 
-          // Pick ONE icon only (per your rules)
-          const iconSrc = !showAnyIcon
+          // rule:
+          // - empty (no cycle row) => no icon + --- ---
+          // - has row this cycle => green check
+          // - has note and NOT resolved => yellow warning
+          // - has note and resolved => green check
+          const unresolvedNote = loggedThisCycle && hasUnresolvedNote(latest);
+          const hasNote = loggedThisCycle && hasAnyNote(latest);
+
+          const iconSrc = !loggedThisCycle
             ? null
             : unresolvedNote
-            ? "/icons/warning.png"
-            : "/icons/check.png";
+              ? "/icons/warning.png"
+              : "/icons/check.png";
 
-          const iconAlt = !showAnyIcon
+          const iconAlt = !loggedThisCycle
             ? ""
             : unresolvedNote
-            ? "Has note"
-            : "Logged";
+              ? "Has note"
+              : hasNote
+                ? "Logged (note resolved)"
+                : "Logged";
 
-          // If not logged this month, show empty meters on house list
-          const dienDisplay = loggedThisMonth
+          const dienDisplay = loggedThisCycle
             ? displayMeter(latest?.dien)
             : "---";
-          const nuocDisplay = loggedThisMonth
+          const nuocDisplay = loggedThisCycle
             ? displayMeter(latest?.nuoc)
             : "---";
 
           return (
             <Link
               key={room}
-              href={`/room/${encodeURIComponent(
-                room
-              )}?house=${encodeURIComponent(house)}`}
+              href={`/room/${encodeURIComponent(room)}?house=${encodeURIComponent(house)}`}
               style={{
                 display: "grid",
                 gridTemplateColumns: "1.2fr 1fr 1fr",
@@ -296,10 +321,6 @@ export default function HousePage() {
             </Link>
           );
         })}
-      </div>
-
-      <div style={{ marginTop: 14, fontSize: 12, opacity: 0.5 }}>
-        History cached rooms: {Object.keys(houseHistory || {}).length}
       </div>
     </main>
   );

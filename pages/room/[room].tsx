@@ -1,5 +1,6 @@
+// pages/room/[room].tsx
 import { useRouter } from "next/router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import BottomSheet from "../../components/BottomSheet";
 
@@ -10,16 +11,26 @@ type Reading = {
   nuoc?: number | null;
   id: number;
   note?: string;
+
+  // from sheet: explicit cycle key like "2026-03"
+  cycle?: string;
 };
 
 type CacheEnvelope<T> = { savedAt: number; data: T };
 
+const VN_TZ = "Asia/Ho_Chi_Minh";
+
 function formatDateShort(d: Date) {
-  return d.toLocaleDateString();
+  return d.toLocaleDateString("en-GB", {
+    timeZone: VN_TZ,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
 }
 
 function formatDateTime(d: Date) {
-  return d.toLocaleString();
+  return d.toLocaleString("en-GB", { timeZone: VN_TZ });
 }
 
 function diffText(diff: number | null) {
@@ -34,6 +45,9 @@ function latestKey(house: string) {
 function historyKey(house: string) {
   return `vtpt_houseHistory_${house}`;
 }
+function cycleKey() {
+  return `vtpt_cycleMonth`;
+}
 
 function safeJsonParse<T>(s: string | null): T | null {
   if (!s) return null;
@@ -44,27 +58,35 @@ function safeJsonParse<T>(s: string | null): T | null {
   }
 }
 
+/** Fallback only for OLD rows that don't have cycle stamped */
 function monthKeyFromDateString(dateStr: string) {
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return "unknown";
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function currentMonthKey() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function isThisMonth(dateStr?: string) {
-  if (!dateStr) return false;
-  return monthKeyFromDateString(dateStr) === currentMonthKey();
+/**
+ * ✅ New truth:
+ * - If row has cycle => compare directly
+ * - If row missing cycle (old data) => fallback to date-month
+ */
+function isRowInCycle(row: Reading | null, cycleMonth: string | null) {
+  if (!row || !cycleMonth) return false;
+  const c = String(row.cycle || "").trim();
+  if (c) return c === cycleMonth;
+  return monthKeyFromDateString(row.date) === cycleMonth;
 }
 
 function upsertMonthlyHistory(list: Reading[], incoming: Reading, max = 24) {
-  const mk = monthKeyFromDateString(incoming.date);
+  const mk =
+    String(incoming.cycle || "").trim() ||
+    monthKeyFromDateString(incoming.date);
 
   const next = Array.isArray(list) ? list.slice() : [];
-  const filtered = next.filter((r) => monthKeyFromDateString(r.date) !== mk);
+  const filtered = next.filter((r) => {
+    const rk = String(r.cycle || "").trim() || monthKeyFromDateString(r.date);
+    return rk !== mk;
+  });
 
   filtered.unshift(incoming);
 
@@ -85,7 +107,7 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 
   const key = latestKey(house);
   const cached = safeJsonParse<CacheEnvelope<Reading[]>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data = Array.isArray(cached?.data) ? cached!.data.slice() : [];
@@ -100,13 +122,13 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
 function writeHouseHistoryRoomListToCache(
   house: string,
   room: string,
-  nextList: Reading[]
+  nextList: Reading[],
 ) {
   if (!house || !room) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -120,13 +142,13 @@ function writeHouseHistoryRoomListToCache(
 function upsertHouseHistoryCache(
   house: string,
   reading: Reading,
-  maxPerRoom = 24
+  maxPerRoom = 24,
 ) {
   if (!house) return;
 
   const key = historyKey(house);
   const cached = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-    localStorage.getItem(key)
+    localStorage.getItem(key),
   );
 
   const data: Record<string, Reading[]> = cached?.data
@@ -180,6 +202,16 @@ function getReadingValue(row: Reading, tab: "dien" | "nuoc"): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 // ----------------------------------------------------------------
+
+// ✅ VN-day compare (for "same day => update instead of add row")
+function vnDayKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "invalid";
+  return d.toLocaleDateString("en-CA", { timeZone: VN_TZ }); // YYYY-MM-DD
+}
+function isSameVNDay(aIso: string, bIso: string) {
+  return vnDayKey(aIso) === vnDayKey(bIso);
+}
 
 function Field({
   label,
@@ -237,13 +269,14 @@ export default function RoomPage() {
   const room = (router.query.room as string) || "";
   const house = (router.query.house as string) || "";
 
-  const [loadingLatest, setLoadingLatest] = useState(true);
-  const [latest, setLatest] = useState<Reading | null>(null);
+  const [latestOverall, setLatestOverall] = useState<Reading | null>(null);
 
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<Reading[]>([]);
 
-  // NEW: third tab in History section
+  const [cycleMonth, setCycleMonth] = useState<string | null>(null);
+  const [loadingCycle, setLoadingCycle] = useState(true);
+
   const [tab, setTab] = useState<"dien" | "nuoc" | "log">("dien");
 
   const [showSheet, setShowSheet] = useState(false);
@@ -256,32 +289,77 @@ export default function RoomPage() {
   const [editing, setEditing] = useState<Reading | null>(null);
   const isEditing = !!editing;
 
+  // saving = only block while confirm button is being handled (very short)
   const [saving, setSaving] = useState(false);
+
+  // syncing = background network syncing; DOES NOT block taps/edits
+  const [syncing, setSyncing] = useState(false);
+
   const [msg, setMsg] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // NEW: log state
+  // log state
   const [loadingLog, setLoadingLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logErr, setLogErr] = useState<string | null>(null);
 
   const TTL_MS = 2 * 60 * 1000;
 
+  // sync control
+  const syncTimerRef = useRef<number | null>(null);
+  const syncSeqRef = useRef(0);
+  const syncingRef = useRef(false);
+
+  function setSyncingSafe(v: boolean) {
+    syncingRef.current = v;
+    setSyncing(v);
+  }
+
+  function showToast(msgText: string, ms = 1300) {
+    setToast(msgText);
+    window.setTimeout(() => setToast((t) => (t === msgText ? null : t)), ms);
+  }
+
+  function sortNewestFirst(list: Reading[]) {
+    const next = Array.isArray(list) ? list.slice() : [];
+    next.sort(
+      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+    );
+    return next;
+  }
+
+  const latestCycle = useMemo(() => {
+    if (!cycleMonth) return null;
+    const list = sortNewestFirst(history);
+    for (const r of list) {
+      if (isRowInCycle(r, cycleMonth)) return r;
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history, cycleMonth]);
+
   function loadFromCaches() {
     if (!room || !house) return;
 
-    setLoadingLatest(true);
+    // cycle cache
+    const cachedCycle = safeJsonParse<CacheEnvelope<string>>(
+      localStorage.getItem(cycleKey()),
+    );
+    if (cachedCycle?.data) setCycleMonth(String(cachedCycle.data));
+    setLoadingCycle(false);
+
+    // overall latest (used only for "Last recorded" text)
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+      localStorage.getItem(latestKey(house)),
     );
     const foundLatest =
       cachedLatest?.data?.find((x) => x.room === room) || null;
-    setLatest(foundLatest);
-    setLoadingLatest(false);
+    setLatestOverall(foundLatest);
 
+    // history
     setLoadingHistory(true);
     const cachedHist = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
+      localStorage.getItem(historyKey(house)),
     );
     const list = cachedHist?.data?.[room];
     setHistory(Array.isArray(list) ? list : []);
@@ -291,70 +369,109 @@ export default function RoomPage() {
   async function backgroundRefreshIfStale() {
     if (!house) return;
 
+    const cycleCache = safeJsonParse<CacheEnvelope<string>>(
+      localStorage.getItem(cycleKey()),
+    );
     const latestCache = safeJsonParse<CacheEnvelope<Reading[]>>(
-      localStorage.getItem(latestKey(house))
+      localStorage.getItem(latestKey(house)),
     );
     const histCache = safeJsonParse<CacheEnvelope<Record<string, Reading[]>>>(
-      localStorage.getItem(historyKey(house))
+      localStorage.getItem(historyKey(house)),
     );
 
+    const cycleFresh =
+      !!cycleCache?.savedAt && Date.now() - cycleCache.savedAt < TTL_MS;
     const latestFresh =
-      latestCache?.savedAt && Date.now() - latestCache.savedAt < TTL_MS;
-    const histFresh =
-      histCache?.savedAt && Date.now() - histCache.savedAt < TTL_MS;
+      !!latestCache?.savedAt && Date.now() - latestCache.savedAt < TTL_MS;
 
-    if (latestFresh && histFresh) return;
+    const roomHist = histCache?.data?.[room];
+    const histFresh =
+      !!histCache?.savedAt &&
+      Date.now() - histCache.savedAt < TTL_MS &&
+      Array.isArray(roomHist) &&
+      roomHist.length > 0;
+
+    if (cycleFresh && latestFresh && histFresh) return;
 
     try {
+      setLoadingCycle(true);
+
+      if (!cycleFresh) {
+        const c = await fetch(`/api/meter?action=cycleGet`);
+        const cj = await c.json();
+        const cm = cj && cj.ok && typeof cj.data === "string" ? cj.data : null;
+        if (cm) {
+          setCycleMonth(cm);
+          localStorage.setItem(
+            cycleKey(),
+            JSON.stringify({ savedAt: Date.now(), data: cm }),
+          );
+        }
+      }
+
       if (!latestFresh) {
         const r1 = await fetch(
-          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`
+          `/api/meter?action=houseLatest&house=${encodeURIComponent(house)}`,
         );
         const j1 = await r1.json();
         const arr: Reading[] = Array.isArray(j1?.data) ? j1.data : [];
         localStorage.setItem(
           latestKey(house),
-          JSON.stringify({ savedAt: Date.now(), data: arr })
+          JSON.stringify({ savedAt: Date.now(), data: arr }),
         );
       }
 
       if (!histFresh) {
         const r2 = await fetch(
           `/api/meter?action=houseHistory&house=${encodeURIComponent(
-            house
-          )}&limitPerRoom=24`
+            house,
+          )}&limitPerRoom=24`,
         );
         const j2 = await r2.json();
         const data: Record<string, Reading[]> =
           j2 && j2.ok && j2.data ? j2.data : {};
         localStorage.setItem(
           historyKey(house),
-          JSON.stringify({ savedAt: Date.now(), data })
+          JSON.stringify({ savedAt: Date.now(), data }),
         );
       }
 
       loadFromCaches();
+    } catch (e) {
+      console.log("backgroundRefreshIfStale failed", e);
+    } finally {
+      setLoadingCycle(false);
+    }
+  }
+
+  async function refreshOverallLatestFromNetwork() {
+    if (!room) return;
+    try {
+      const latestRes = await fetch(
+        `/api/meter?room=${encodeURIComponent(room)}&action=latest`,
+      );
+      const latestJson = await latestRes.json();
+      const latestData: Reading | null = latestJson?.data || null;
+
+      setLatestOverall(latestData);
+      if (latestData && house) upsertHouseLatestCache(house, latestData);
     } catch {
       // ignore
     }
   }
 
-  async function refreshLatestFromNetwork() {
+  async function refreshHistoryFromNetwork() {
     if (!room) return;
     try {
-      const latestRes = await fetch(
-        `/api/meter?room=${encodeURIComponent(room)}&action=latest`
+      const r = await fetch(
+        `/api/meter?room=${encodeURIComponent(room)}&action=history&limit=24`,
       );
-      const latestJson = await latestRes.json();
-      const latestData: Reading | null = latestJson?.data || null;
+      const j = await r.json();
+      const arr: Reading[] = Array.isArray(j?.data) ? j.data : [];
+      const sorted = sortNewestFirst(arr).slice(0, 24);
 
-      setLatest(latestData);
-      if (latestData && house) upsertHouseLatestCache(house, latestData);
-
-      if (latestData && house) {
-        upsertHouseHistoryCache(house, latestData, 24);
-        setHistory((prev) => upsertMonthlyHistory(prev, latestData, 24));
-      }
+      setHistory(sorted);
+      if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
     } catch {
       // ignore
     }
@@ -366,7 +483,7 @@ export default function RoomPage() {
     setLogErr(null);
     try {
       const r = await fetch(
-        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`
+        `/api/meter?action=log&room=${encodeURIComponent(room)}&limit=200`,
       );
       const j = await r.json();
       if (!j?.ok) {
@@ -383,29 +500,44 @@ export default function RoomPage() {
     }
   }
 
+  function scheduleSyncSoon() {
+    if (syncTimerRef.current) {
+      window.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    syncTimerRef.current = window.setTimeout(() => {
+      void runBackgroundSync();
+    }, 450);
+  }
+
+  async function runBackgroundSync() {
+    const mySeq = ++syncSeqRef.current;
+    setSyncingSafe(true);
+
+    try {
+      await Promise.all([
+        refreshOverallLatestFromNetwork(),
+        refreshHistoryFromNetwork(),
+      ]);
+      if (tab === "log") await refreshLogFromNetwork();
+
+      // ignore stale runs
+      if (mySeq !== syncSeqRef.current) return;
+
+      setSyncingSafe(false);
+      showToast("Synced ✅", 900);
+    } catch {
+      if (mySeq !== syncSeqRef.current) return;
+      setSyncingSafe(false);
+      showToast("Sync failed ⚠️", 1200);
+    }
+  }
+
   function closeEditSheet() {
     if (saving) return;
     setShowSheet(false);
     setEditing(null);
     setMsg(null);
-  }
-
-  function sortNewestFirst(list: Reading[]) {
-    const next = Array.isArray(list) ? list.slice() : [];
-    next.sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-    );
-    return next;
-  }
-
-  function recomputeLatestFromHistory(nextHistory: Reading[]) {
-    const nextSorted = sortNewestFirst(nextHistory);
-    const top = nextSorted.length > 0 ? nextSorted[0] : null;
-    setLatest(top);
-
-    if (house && top) {
-      upsertHouseLatestCache(house, top);
-    }
   }
 
   useEffect(() => {
@@ -423,12 +555,18 @@ export default function RoomPage() {
     setLogLines([]);
     setLogErr(null);
 
+    setSyncingSafe(false);
+    if (syncTimerRef.current) {
+      window.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    syncSeqRef.current = 0;
+
     loadFromCaches();
     backgroundRefreshIfStale();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
-  // When switching to Log tab, fetch it
   useEffect(() => {
     if (tab === "log") refreshLogFromNetwork();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -450,8 +588,9 @@ export default function RoomPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [saving, showConfirmSheet]);
 
-  const hasThisMonth = !!(latest && isThisMonth(latest.date));
-  const buttonLabel = hasThisMonth ? "Edit" : "Add";
+  const hasThisCycle = isRowInCycle(latestCycle, cycleMonth);
+
+  const buttonLabel = "Record";
 
   function openSheet() {
     setMsg(null);
@@ -459,19 +598,20 @@ export default function RoomPage() {
     setShowConfirmSheet(false);
     setShowSheet(true);
 
-    // ✅ IMPORTANT: New month should be EMPTY (do NOT carry last month's numbers)
-    if (latest && isThisMonth(latest.date)) {
+    const base = hasThisCycle ? latestCycle : null;
+
+    if (base) {
       setDienInput(
-        typeof latest.dien === "number" && Number.isFinite(latest.dien)
-          ? String(latest.dien)
-          : ""
+        typeof base.dien === "number" && Number.isFinite(base.dien)
+          ? String(base.dien)
+          : "",
       );
       setNuocInput(
-        typeof latest.nuoc === "number" && Number.isFinite(latest.nuoc)
-          ? String(latest.nuoc)
-          : ""
+        typeof base.nuoc === "number" && Number.isFinite(base.nuoc)
+          ? String(base.nuoc)
+          : "",
       );
-      setNoteInput(String(latest.note ?? ""));
+      setNoteInput(String(base.note ?? ""));
     } else {
       setDienInput("");
       setNuocInput("");
@@ -481,6 +621,7 @@ export default function RoomPage() {
 
   function openEditRow(r: Reading) {
     if (saving) return;
+
     setMsg(null);
     setEditing(r);
     setShowConfirmSheet(false);
@@ -489,17 +630,18 @@ export default function RoomPage() {
     setDienInput(
       typeof r.dien === "number" && Number.isFinite(r.dien)
         ? String(r.dien)
-        : ""
+        : "",
     );
     setNuocInput(
       typeof r.nuoc === "number" && Number.isFinite(r.nuoc)
         ? String(r.nuoc)
-        : ""
+        : "",
     );
     setNoteInput(String(r.note ?? ""));
   }
 
-  const canTapCard = !saving && !loadingLatest && !!room && !!house;
+  // IMPORTANT: do NOT block taps while syncing. only block while saving click is processed.
+  const canTapCard = !saving && !!room && !!house;
 
   function onMeterCardKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (!canTapCard) return;
@@ -524,6 +666,50 @@ export default function RoomPage() {
     setShowConfirmSheet(true);
   }
 
+  async function fireAndForgetWrite(payload: any) {
+    const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
+    if (!pin) {
+      setMsg("Missing PIN. Please go back and unlock again.");
+      setSyncingSafe(false);
+      return;
+    }
+
+    // keepalive helps when user navigates immediately
+    fetch("/api/meter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-vtpt-pin": pin,
+      },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    })
+      .then(async (res) => {
+        let j: any = null;
+        try {
+          j = await res.json();
+        } catch {
+          // ignore
+        }
+
+        if (!j?.ok) {
+          setMsg(j?.error || "Save failed.");
+          setSyncingSafe(false);
+          showToast("Sync failed ⚠️", 1200);
+          scheduleSyncSoon();
+          return;
+        }
+
+        // Success: schedule a truth sync (replaces temp id / ensures stamps)
+        scheduleSyncSoon();
+      })
+      .catch(() => {
+        setSyncingSafe(false);
+        showToast("Sync failed ⚠️", 1200);
+        scheduleSyncSoon();
+      });
+  }
+
   async function commitSaveReading() {
     setMsg(null);
 
@@ -538,89 +724,96 @@ export default function RoomPage() {
     setSaving(true);
     setShowConfirmSheet(false);
 
+    const nowIso = new Date().toISOString();
+
+    const baseSameDayRow =
+      !isEditing && hasThisCycle && latestCycle && latestCycle.date
+        ? isSameVNDay(latestCycle.date, nowIso)
+          ? latestCycle
+          : null
+        : null;
+
+    const willUpdate = isEditing || !!baseSameDayRow;
+
+    const targetForUpdate =
+      isEditing && editing
+        ? { id: editing.id, date: editing.date }
+        : baseSameDayRow
+          ? { id: baseSameDayRow.id, date: baseSameDayRow.date }
+          : undefined;
+
+    const tempId = -Date.now();
+    const optimisticCycle = cycleMonth || undefined;
+
     const optimistic: Reading = {
       room,
-      date: editing?.date ?? new Date().toISOString(),
-      id: editing?.id ?? latest?.id ?? 0,
+      date: willUpdate
+        ? isEditing && editing
+          ? editing.date
+          : baseSameDayRow!.date
+        : nowIso,
+      id: willUpdate
+        ? isEditing && editing
+          ? editing.id
+          : baseSameDayRow!.id
+        : tempId,
       dien: dienNum,
       nuoc: nuocNum,
       note: noteInput.trim(),
+      cycle: optimisticCycle,
     };
 
+    // ✅ instant UI update
     if (house) {
-      if (isEditing && editing) {
+      if (willUpdate && targetForUpdate) {
         setHistory((prev) => {
           const replaced = prev.map((x) =>
-            x.id === editing.id && x.date === editing.date ? optimistic : x
+            x.id === targetForUpdate.id && x.date === targetForUpdate.date
+              ? { ...x, ...optimistic }
+              : x,
           );
           const next = sortNewestFirst(replaced).slice(0, 24);
           writeHouseHistoryRoomListToCache(house, room, next);
-          recomputeLatestFromHistory(next);
           return next;
         });
       } else {
-        upsertHouseLatestCache(house, optimistic);
-        upsertHouseHistoryCache(house, optimistic, 24);
         setHistory((prev) => {
-          const next = upsertMonthlyHistory(prev, optimistic, 24);
-          recomputeLatestFromHistory(next);
+          const next = [optimistic, ...prev].slice(0, 24);
+          writeHouseHistoryRoomListToCache(house, room, next);
           return next;
         });
-        setLatest(optimistic);
       }
-    } else {
-      setLatest(optimistic);
+
+      // House page is driven by vtpt_houseLatest cache: update it immediately
+      upsertHouseLatestCache(house, optimistic);
+
+      // (optional) also keep per-room history cache consistent
+      upsertHouseHistoryCache(house, optimistic, 24);
     }
 
     setEditing(null);
+    setShowSheet(false);
+    setShowConfirmSheet(false);
 
-    setToast("Saved ✅");
-    window.setTimeout(() => setToast(null), 1500);
+    showToast("Saved ✅", 900);
 
-    try {
-      const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
-      if (!pin) {
-        setMsg("Missing PIN. Please go back and unlock again.");
-        setSaving(false);
-        return;
-      }
+    // ✅ background sync starts immediately, no UI blocking
+    setSyncingSafe(true);
+    window.setTimeout(() => {
+      if (syncingRef.current) setToast("Syncing…");
+    }, 350);
 
-      const res = await fetch("/api/meter", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-vtpt-pin": pin,
-        },
-        body: JSON.stringify({
-          action: isEditing ? "update" : "save",
-          room,
-          dien: dienNum,
-          nuoc: nuocNum,
-          note: noteInput.trim(),
-          target:
-            isEditing && editing
-              ? { id: editing.id, date: editing.date }
-              : undefined,
-        }),
-      });
+    const action = willUpdate ? "update" : "save";
+    void fireAndForgetWrite({
+      action,
+      room,
+      dien: dienNum,
+      nuoc: nuocNum,
+      note: noteInput.trim(),
+      target: willUpdate ? targetForUpdate : undefined,
+    });
 
-      const json = await res.json();
-      if (!json.ok) {
-        setMsg(json.error || "Save failed.");
-        setSaving(false);
-        await refreshLatestFromNetwork();
-        return;
-      }
-
-      await refreshLatestFromNetwork();
-      // If user is on Log tab, refresh it too
-      if (tab === "log") await refreshLogFromNetwork();
-
-      setSaving(false);
-    } catch (err: any) {
-      setMsg(String(err));
-      setSaving(false);
-    }
+    setSaving(false);
   }
 
   async function deleteEditingRow() {
@@ -630,72 +823,87 @@ export default function RoomPage() {
     if (!ok) return;
 
     setSaving(true);
-    closeEditSheet();
 
+    const deleting = editing;
+
+    // close UI immediately
+    setShowSheet(false);
+    setShowConfirmSheet(false);
+    setEditing(null);
+    setMsg(null);
+
+    // optimistic remove
     setHistory((prev) => {
       const next = prev.filter(
-        (x) => !(x.id === editing.id && x.date === editing.date)
+        (x) => !(x.id === deleting.id && x.date === deleting.date),
       );
       const sorted = sortNewestFirst(next).slice(0, 24);
-
       if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
-      recomputeLatestFromHistory(sorted);
-
       return sorted;
     });
 
-    setToast("Deleted ✅");
-    window.setTimeout(() => setToast(null), 1500);
+    showToast("Deleted ✅", 900);
 
-    try {
-      const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
-      if (!pin) {
-        setMsg("Missing PIN. Please go back and unlock again.");
-        setSaving(false);
-        return;
-      }
+    setSyncingSafe(true);
+    window.setTimeout(() => {
+      if (syncingRef.current) setToast("Syncing…");
+    }, 350);
 
-      const res = await fetch("/api/meter", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-vtpt-pin": pin,
-        },
-        body: JSON.stringify({
-          action: "delete",
-          room,
-          target: { id: editing.id, date: editing.date },
-        }),
+    const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
+    if (!pin) {
+      setMsg("Missing PIN. Please go back and unlock again.");
+      setSyncingSafe(false);
+      setSaving(false);
+      return;
+    }
+
+    fetch("/api/meter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-vtpt-pin": pin,
+      },
+      body: JSON.stringify({
+        action: "delete",
+        room,
+        target: { id: deleting.id, date: deleting.date },
+      }),
+      keepalive: true,
+    })
+      .then(async (res) => {
+        let j: any = null;
+        try {
+          j = await res.json();
+        } catch {
+          // ignore
+        }
+        if (!j?.ok) {
+          setMsg(j?.error || "Delete failed.");
+          setSyncingSafe(false);
+          showToast("Sync failed ⚠️", 1200);
+          scheduleSyncSoon();
+          return;
+        }
+        scheduleSyncSoon();
+      })
+      .catch(() => {
+        setSyncingSafe(false);
+        showToast("Sync failed ⚠️", 1200);
+        scheduleSyncSoon();
       });
 
-      const json = await res.json();
-      if (!json.ok) {
-        setMsg(json.error || "Delete failed.");
-        setSaving(false);
-        await refreshLatestFromNetwork();
-        return;
-      }
-
-      await refreshLatestFromNetwork();
-      if (tab === "log") await refreshLogFromNetwork();
-
-      setSaving(false);
-    } catch (err: any) {
-      setMsg(String(err));
-      setSaving(false);
-    } finally {
-      setEditing(null);
-    }
+    setSaving(false);
   }
 
-  const latestDate = useMemo(() => {
-    if (!latest?.date) return null;
-    const d = new Date(latest.date);
+  const overallLatestDate = useMemo(() => {
+    if (!latestOverall?.date) return null;
+    const d = new Date(latestOverall.date);
     return isNaN(d.getTime()) ? null : d;
-  }, [latest]);
+  }, [latestOverall]);
 
   const historyRows = useMemo(() => {
-    const list = Array.isArray(history) ? history : [];
+    const list = Array.isArray(history) ? sortNewestFirst(history) : [];
+
     return list.map((row, idx) => {
       const currVal = getReadingValue(row, tab === "log" ? "dien" : tab);
       const nextOlder = list[idx + 1];
@@ -711,10 +919,10 @@ export default function RoomPage() {
         diff === null
           ? undefined
           : diff > 0
-          ? "#16a34a"
-          : diff < 0
-          ? "#dc2626"
-          : undefined;
+            ? "#16a34a"
+            : diff < 0
+              ? "#dc2626"
+              : undefined;
 
       const d = new Date(row.date);
       const safeDate = isNaN(d.getTime()) ? null : d;
@@ -730,27 +938,28 @@ export default function RoomPage() {
     });
   }, [history, tab]);
 
-  // ✅ show "This month reading" as empty unless latest is in THIS month
-  const showThisMonthNumbers = hasThisMonth;
+  const showCycleNumbers = hasThisCycle;
 
   const latestDien =
-    showThisMonthNumbers &&
-    latest &&
-    typeof latest.dien === "number" &&
-    Number.isFinite(latest.dien)
-      ? latest.dien
+    showCycleNumbers &&
+    latestCycle &&
+    typeof latestCycle.dien === "number" &&
+    Number.isFinite(latestCycle.dien)
+      ? latestCycle.dien
       : null;
 
   const latestNuoc =
-    showThisMonthNumbers &&
-    latest &&
-    typeof latest.nuoc === "number" &&
-    Number.isFinite(latest.nuoc)
-      ? latest.nuoc
+    showCycleNumbers &&
+    latestCycle &&
+    typeof latestCycle.nuoc === "number" &&
+    Number.isFinite(latestCycle.nuoc)
+      ? latestCycle.nuoc
       : null;
 
   const confirmDien = parseOptionalNumberFromInput(dienInput);
   const confirmNuoc = parseOptionalNumberFromInput(nuocInput);
+
+  const topReady = !loadingHistory && !loadingCycle;
 
   return (
     <main
@@ -778,9 +987,16 @@ export default function RoomPage() {
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 20, fontWeight: 800 }}>{room}</div>
           <div style={{ fontSize: 12, opacity: 0.6 }}>
-            {latestDate
-              ? `Last recorded: ${formatDateTime(latestDate)}`
+            {overallLatestDate
+              ? `Last recorded: ${formatDateTime(overallLatestDate)}`
               : "No record yet"}
+            <span style={{ marginLeft: 8, opacity: 0.55 }}>
+              {loadingCycle
+                ? "• Cycle …"
+                : cycleMonth
+                  ? `• Cycle ${cycleMonth}`
+                  : "• Cycle —"}
+            </span>
           </div>
         </div>
 
@@ -793,22 +1009,29 @@ export default function RoomPage() {
               background: "#fff",
               fontWeight: 800,
               fontSize: 12,
+              opacity: syncing ? 0.9 : 1,
             }}
           >
-            {toast}
+            {syncing ? "Syncing…" : toast}
           </div>
         )}
       </div>
 
       <div style={{ marginTop: 18 }}>
         <div style={{ fontSize: 16, fontWeight: 800, opacity: 0.75 }}>
-          This month reading
+          Current cycle reading
         </div>
 
         <div style={{ display: "grid", gap: 12, marginTop: 12 }}>
           <div
             onClick={() => canTapCard && openSheet()}
-            onKeyDown={onMeterCardKeyDown}
+            onKeyDown={(e) => {
+              if (!canTapCard) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openSheet();
+              }
+            }}
             role="button"
             tabIndex={canTapCard ? 0 : -1}
             aria-disabled={!canTapCard}
@@ -822,7 +1045,7 @@ export default function RoomPage() {
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Electric Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
-              {loadingLatest ? "…" : latestDien === null ? "— — —" : latestDien}
+              {!topReady ? "…" : latestDien === null ? "— — —" : latestDien}
               <span
                 style={{
                   fontSize: 16,
@@ -852,7 +1075,7 @@ export default function RoomPage() {
           >
             <div style={{ fontWeight: 800, opacity: 0.8 }}>Water Meter</div>
             <div style={{ marginTop: 10, fontSize: 34, fontWeight: 900 }}>
-              {loadingLatest ? "…" : latestNuoc === null ? "— — —" : latestNuoc}
+              {!topReady ? "…" : latestNuoc === null ? "— — —" : latestNuoc}
               <span
                 style={{
                   fontSize: 16,
@@ -1124,11 +1347,7 @@ export default function RoomPage() {
           )}
 
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 10,
-            }}
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
           >
             {isEditing ? (
               <button
@@ -1184,7 +1403,7 @@ export default function RoomPage() {
         </div>
       </BottomSheet>
 
-      {/* Confirm Sheet (Step 2) - numbers only */}
+      {/* Confirm Sheet (Step 2) */}
       <BottomSheet
         open={showConfirmSheet}
         title="Confirm"
@@ -1250,11 +1469,7 @@ export default function RoomPage() {
           )}
 
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 10,
-            }}
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
           >
             <button
               onClick={() => {

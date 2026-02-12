@@ -1,3 +1,4 @@
+// pages/api/meter.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
@@ -5,6 +6,9 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
+
+// Admin PIN list: "1111,9999"
+const VTPT_ADMIN_PINS = process.env.VTPT_ADMIN_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
 type ApiErr = { ok: false; error: string };
@@ -36,18 +40,109 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
-async function fetchJson(url: string, init?: RequestInit) {
-  const res = await fetch(url, init);
-  const text = await res.text();
+function parseAdminPins(raw?: string): Set<string> {
+  const set = new Set<string>();
+  if (!raw) return set;
+  raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((pin) => set.add(pin));
+  return set;
+}
 
-  let json: any;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(text || `Upstream error ${res.status}`);
+/**
+ * =========================
+ * In-memory cache (server-side)
+ * =========================
+ * Goal: make the app feel snappy by deduping repeated GET calls that happen
+ * during refresh/navigation (especially on mobile).
+ *
+ * - Only caches GETs.
+ * - Any successful POST clears cache (so UI can see fresh data).
+ */
+type CacheEntry = { exp: number; status: number; json: any };
+const memCache: Map<string, CacheEntry> =
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).__VTPT_MEMCACHE__ || new Map<string, CacheEntry>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(globalThis as any).__VTPT_MEMCACHE__ = memCache;
+
+function nowMs() {
+  return Date.now();
+}
+
+function cacheGet(key: string): CacheEntry | null {
+  const hit = memCache.get(key);
+  if (!hit) return null;
+  if (hit.exp <= nowMs()) {
+    memCache.delete(key);
+    return null;
   }
+  return hit;
+}
 
-  return { status: res.status, json };
+function cacheSet(key: string, status: number, json: any, ttlMs: number) {
+  memCache.set(key, { exp: nowMs() + ttlMs, status, json });
+}
+
+function cacheClearAll() {
+  memCache.clear();
+}
+
+function cacheKeyForUrl(url: string) {
+  return `GET:${url}`;
+}
+
+function ttlForAction(action: string) {
+  // Tune for “feels fast” without staying stale too long.
+  // Cycle changes only on approve -> can be longer.
+  switch (action) {
+    case "cycleGet":
+      return 30_000; // 30s
+    case "houseCycleLatest":
+      return 10_000; // 10s
+    case "latest":
+    case "history":
+    case "log":
+    case "latestCycle":
+    case "historyByCycle":
+    case "houseLatest":
+    case "houseHistory":
+    case "cyclesGet":
+      return 8_000; // 8s
+    default:
+      return 0; // no cache
+  }
+}
+
+/**
+ * =========================
+ * fetchJson with timeout
+ * =========================
+ */
+async function fetchJson(url: string, init?: RequestInit) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000); // 12s safety
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(text || `Upstream error ${res.status}`);
+    }
+
+    return { status: res.status, json };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function buildScriptUrl(params: Record<string, string>) {
@@ -105,7 +200,10 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
-  return { ok: true as const, actor };
+  const adminSet = parseAdminPins(VTPT_ADMIN_PINS);
+  const isAdmin = adminSet.has(pin);
+
+  return { ok: true as const, actor, isAdmin };
 }
 
 function mapAction(actionRaw: string) {
@@ -113,9 +211,8 @@ function mapAction(actionRaw: string) {
 
   // Backward compatibility aliases (UI or old links might call these)
   const alias: Record<string, string> = {
-    // Some UIs called these, but Apps Script uses houseCycleLatest
     houseLatestCycle: "houseCycleLatest",
-    houseHistoryCycle: "houseHistory", // no direct "cycle history" for whole house in script
+    houseHistoryCycle: "houseHistory",
   };
 
   return alias[a] || a;
@@ -168,8 +265,8 @@ export default async function handler(
         : "";
 
       // cycle param naming:
-      // - your Apps Script uses "cycle" for historyByCycle
-      // - some callers may send "month" (older code)
+      // - Apps Script uses "cycle"
+      // - some callers may send "month"
       const cycle = req.query.cycle
         ? String(req.query.cycle).trim()
         : req.query.month
@@ -180,19 +277,40 @@ export default async function handler(
         return res.status(400).json({ ok: false, error: "Missing action" });
       }
 
-      // ✅ New: cyclesGet (unique cycles that exist in the sheet data)
-      // This is used by index page to show 2026-01 / 2026-02 even if they aren't "current".
+      // ✅ whoami (lets UI know actor + isAdmin)
+      if (action === "whoami") {
+        const auth = requirePinActor(req);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+        return res.status(200).json({
+          ok: true,
+          data: { actor: auth.actor, isAdmin: auth.isAdmin },
+        });
+      }
+
+      // ✅ cyclesGet (unique cycles that exist in the sheet data)
       if (action === "cyclesGet") {
         const url = buildScriptUrl({ action: "cyclesGet" });
-        const { status, json } = await fetchJson(url);
 
-        // If Apps Script already returns ok:true with data, pass-through.
-        // But we normalize to only valid YYYY-MM strings in case upstream returns extra stuff.
-        if (json && json.ok) {
-          const cycles = normalizeCyclesList(json.data ?? json);
-          return res.status(status).json({ ok: true, data: cycles });
+        // server mem cache
+        const ttl = ttlForAction(action);
+        if (ttl > 0) {
+          const hit = cacheGet(cacheKeyForUrl(url));
+          if (hit) return res.status(hit.status).json(hit.json);
         }
 
+        const { status, json } = await fetchJson(url);
+
+        if (json && json.ok) {
+          const cycles = normalizeCyclesList(json.data ?? json);
+          const out = { ok: true, data: cycles };
+
+          if (ttl > 0) cacheSet(cacheKeyForUrl(url), status, out, ttl);
+          return res.status(status).json(out);
+        }
+
+        if (ttl > 0) cacheSet(cacheKeyForUrl(url), status, json, ttl);
         return res.status(status).json(json);
       }
 
@@ -232,10 +350,20 @@ export default async function handler(
         house,
         limit,
         limitPerRoom,
-        cycle, // NOTE: Apps Script expects "cycle" (not "month")
+        cycle, // Apps Script expects "cycle"
       });
 
+      // server mem cache
+      const ttl = ttlForAction(action);
+      if (ttl > 0) {
+        const hit = cacheGet(cacheKeyForUrl(url));
+        if (hit) return res.status(hit.status).json(hit.json);
+      }
+
       const { status, json } = await fetchJson(url);
+
+      if (ttl > 0) cacheSet(cacheKeyForUrl(url), status, json, ttl);
+
       return res.status(status).json(json);
     }
 
@@ -250,6 +378,9 @@ export default async function handler(
         const auth = requirePinActor(req);
         if (!auth.ok) {
           return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+        if (!auth.isAdmin) {
+          return res.status(403).json({ ok: false, error: "Admin only" });
         }
 
         const month = String(body.month || "").trim();
@@ -271,6 +402,9 @@ export default async function handler(
             actor: auth.actor,
           }),
         });
+
+        // any write should invalidate read cache
+        if (json && json.ok) cacheClearAll();
 
         return res.status(status).json(json);
       }
@@ -327,8 +461,7 @@ export default async function handler(
 
       const noteStr = typeof body.note === "string" ? body.note.trim() : "";
 
-      // cycle is OPTIONAL. Your Apps Script ignores it for SAVE and uses script cycle.
-      // For UPDATE, Apps Script keeps the original row cycle anyway.
+      // cycle is OPTIONAL (script stamps for SAVE; UPDATE keeps original row cycle)
       const cycle = typeof body.cycle === "string" ? body.cycle.trim() : "";
       if (cycle && !isMonthKey(cycle)) {
         return res.status(400).json({
@@ -352,7 +485,6 @@ export default async function handler(
         payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;
         payload.note = noteStr;
 
-        // include cycle only if present (harmless if Apps Script ignores)
         if (cycle) payload.cycle = cycle;
 
         if (action === "update") {
@@ -365,6 +497,9 @@ export default async function handler(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
+      // any successful write should invalidate read cache
+      if (json && json.ok) cacheClearAll();
 
       return res.status(status).json(json);
     }

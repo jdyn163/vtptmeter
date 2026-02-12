@@ -6,7 +6,9 @@ const SCRIPT_TOKEN = process.env.SCRIPT_TOKEN; // required by your Apps Script
 // Personal PIN list: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
 
-// Admin PIN list (same format): "1111:Masie"
+// Admin PIN list (supports either):
+// - "1111,2222"
+// - "1111:Masie,2222:Brother"
 const VTPT_ADMIN_PINS = process.env.VTPT_ADMIN_PINS;
 
 type ApiOk<T> = { ok: true; data: T };
@@ -18,25 +20,48 @@ function getHeaderPin(req: NextApiRequest): string {
   return (pin || "").trim();
 }
 
-function parsePins(pinsRaw: string): Record<string, string> {
+// Accept "1111:Masie" or "1111"
+function parsePinListToMap(pinsRaw: string): Record<string, string> {
   const map: Record<string, string> = {};
-  const items = pinsRaw
+  const items = String(pinsRaw || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
   for (const item of items) {
     const idx = item.indexOf(":");
-    if (idx === -1) continue;
+    if (idx === -1) {
+      // allow bare pin
+      const pinOnly = item.trim();
+      if (pinOnly) map[pinOnly] = "Admin";
+      continue;
+    }
 
     const pin = item.slice(0, idx).trim();
     const name = item.slice(idx + 1).trim();
-    if (!pin || !name) continue;
+    if (!pin) continue;
 
-    map[pin] = name;
+    map[pin] = name || "Admin";
   }
 
   return map;
+}
+
+// Accept "1111:Masie" or "1111"
+function parsePinListToSet(pinsRaw: string): Set<string> {
+  const set = new Set<string>();
+  const items = String(pinsRaw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  for (const item of items) {
+    const idx = item.indexOf(":");
+    const pin = idx === -1 ? item.trim() : item.slice(0, idx).trim();
+    if (pin) set.add(pin);
+  }
+
+  return set;
 }
 
 /**
@@ -44,7 +69,7 @@ function parsePins(pinsRaw: string): Record<string, string> {
  * In-memory cache (server-side)
  * =========================
  * - Only caches GETs.
- * - Any successful POST clears cache (so UI can see fresh data).
+ * - Any successful POST clears cache.
  */
 type CacheEntry = { exp: number; status: number; json: any };
 const memCache: Map<string, CacheEntry> =
@@ -85,8 +110,6 @@ function ttlForAction(action: string) {
       return 30_000; // 30s
     case "houseCycleLatest":
       return 10_000; // 10s
-    case "whoami":
-      return 0; // never cache auth result
     case "latest":
     case "history":
     case "log":
@@ -102,13 +125,11 @@ function ttlForAction(action: string) {
 }
 
 /**
- * =========================
  * fetchJson with timeout
- * =========================
  */
 async function fetchJson(url: string, init?: RequestInit) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000); // 12s safety
+  const timeout = setTimeout(() => controller.abort(), 12_000);
 
   try {
     const res = await fetch(url, {
@@ -154,7 +175,7 @@ function isMonthKey(s: any) {
   return /^\d{4}-\d{2}$/.test(String(s || "").trim());
 }
 
-function requirePinActor(req: NextApiRequest) {
+function getAuth(req: NextApiRequest) {
   if (!VTPT_PINS) {
     return {
       ok: false as const,
@@ -164,7 +185,7 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
-  const pins = parsePins(VTPT_PINS);
+  const pins = parsePinListToMap(VTPT_PINS);
   if (!Object.keys(pins).length) {
     return {
       ok: false as const,
@@ -173,9 +194,6 @@ function requirePinActor(req: NextApiRequest) {
         "Server not configured: VTPT_PINS is empty/invalid (expected '1111:Masie,2222:Brother').",
     };
   }
-
-  const adminPinsMap = VTPT_ADMIN_PINS ? parsePins(VTPT_ADMIN_PINS) : {};
-  const adminPins = new Set(Object.keys(adminPinsMap));
 
   const pin = getHeaderPin(req);
   const actor = pin ? pins[pin] : undefined;
@@ -188,9 +206,10 @@ function requirePinActor(req: NextApiRequest) {
     };
   }
 
-  const isAdmin = adminPins.has(pin);
+  const adminSet = parsePinListToSet(VTPT_ADMIN_PINS || "");
+  const isAdmin = pin ? adminSet.has(pin) : false;
 
-  return { ok: true as const, actor, isAdmin, pin, adminCount: adminPins.size };
+  return { ok: true as const, actor, pin, isAdmin };
 }
 
 function mapAction(actionRaw: string) {
@@ -238,6 +257,18 @@ export default async function handler(
     if (req.method === "GET") {
       const action = mapAction(String(req.query.action || "").trim());
 
+      // whoami: confirm server sees your pin, and whether it’s admin
+      if (action === "whoami") {
+        const auth = getAuth(req);
+        if (!auth.ok) {
+          return res.status(auth.status).json({ ok: false, error: auth.error });
+        }
+        return res.status(200).json({
+          ok: true,
+          data: { actor: auth.actor, isAdmin: auth.isAdmin },
+        });
+      }
+
       const room = String(req.query.room || "").trim();
       const house = String(req.query.house || "").trim();
 
@@ -256,36 +287,6 @@ export default async function handler(
         return res.status(400).json({ ok: false, error: "Missing action" });
       }
 
-      // ✅ whoami: tells UI whether this PIN is admin or user
-      if (action === "whoami") {
-        const auth = requirePinActor(req);
-        if (!auth.ok) {
-          return res.status(auth.status).json({ ok: false, error: auth.error });
-        }
-
-        // Keep it useful but not leaky:
-        // - role
-        // - actor name
-        // - whether admin pins are configured (count)
-        const out: ApiOk<{
-          actor: string;
-          role: "admin" | "user";
-          adminPinsConfigured: boolean;
-          adminPinsCount: number;
-        }> = {
-          ok: true,
-          data: {
-            actor: auth.actor,
-            role: auth.isAdmin ? "admin" : "user",
-            adminPinsConfigured: auth.adminCount > 0,
-            adminPinsCount: auth.adminCount,
-          },
-        };
-
-        return res.status(200).json(out);
-      }
-
-      // ✅ cyclesGet (unique cycles that exist in the sheet data)
       if (action === "cyclesGet") {
         const url = buildScriptUrl({ action: "cyclesGet" });
 
@@ -361,22 +362,23 @@ export default async function handler(
     }
 
     // =========================
-    // POST (WRITE): save / update / delete / cycleSet
+    // POST (WRITE)
     // =========================
     if (req.method === "POST") {
       const body = req.body || {};
       const actionRaw = String(body.action || "save").trim();
 
-      // cycleSet should be ADMIN-only
       if (actionRaw === "cycleSet") {
-        const auth = requirePinActor(req);
+        const auth = getAuth(req);
         if (!auth.ok) {
           return res.status(auth.status).json({ ok: false, error: auth.error });
         }
+
+        // ✅ recommended: cycleSet should be admin-only
         if (!auth.isAdmin) {
           return res
             .status(403)
-            .json({ ok: false, error: "Forbidden (admin PIN required)" });
+            .json({ ok: false, error: "Forbidden (admin only)" });
         }
 
         const month = String(body.month || "").trim();
@@ -404,7 +406,7 @@ export default async function handler(
         return res.status(status).json(json);
       }
 
-      const auth = requirePinActor(req);
+      const auth = getAuth(req);
       if (!auth.ok) {
         return res.status(auth.status).json({ ok: false, error: auth.error });
       }

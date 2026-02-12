@@ -1,8 +1,14 @@
 // pages/api/auth.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
-// Format: "1111:Masie,2222:Brother,3333:Thuan"
+// VTPT_PINS format: "1111:Masie,2222:Brother,3333:Thuan"
 const VTPT_PINS = process.env.VTPT_PINS;
+
+// VTPT_ADMIN_PINS supports ANY of these formats:
+// - "1111,2222"
+// - "1111:Masie,2222:Brother"   (label after ":" is ignored)
+// - "1111;2222" or "1111 2222"  (we normalize separators)
+const VTPT_ADMIN_PINS = process.env.VTPT_ADMIN_PINS;
 
 type Role = "admin" | "user";
 
@@ -11,7 +17,6 @@ type Err = { ok: false; error: string };
 
 function parsePins(pinsRaw: string): Record<string, string> {
   const map: Record<string, string> = {};
-
   const items = pinsRaw
     .split(",")
     .map((s) => s.trim())
@@ -31,14 +36,42 @@ function parsePins(pinsRaw: string): Record<string, string> {
   return map;
 }
 
-function isAdminActor(actor: string) {
-  // Keep this strict + predictable.
-  // If you later want multiple admins, we can switch to env VTPT_ADMINS.
-  return (
-    String(actor || "")
-      .trim()
-      .toLowerCase() === "masie"
-  );
+function parseAdminPins(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+
+  // Normalize separators to comma, then parse each token.
+  const normalized = raw
+    .replaceAll("\n", ",")
+    .replaceAll("\r", ",")
+    .replaceAll(";", ",")
+    .replaceAll("|", ",")
+    .replaceAll(" ", ",");
+
+  const set = new Set<string>();
+
+  for (const part of normalized
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    // allow "1234:Masie" too (ignore label)
+    const pin = part.includes(":") ? part.split(":")[0].trim() : part;
+    if (pin) set.add(pin);
+  }
+
+  return set;
+}
+
+function getHeaderPin(req: NextApiRequest): string {
+  const raw = req.headers["x-vtpt-pin"];
+  const pin = Array.isArray(raw) ? raw[0] : raw;
+  return (pin || "").trim();
+}
+
+function getPinFromRequest(req: NextApiRequest): string {
+  // Prefer header (used by some callers), fallback to body (unlock page)
+  const headerPin = getHeaderPin(req);
+  if (headerPin) return headerPin;
+  return String(req.body?.pin || "").trim();
 }
 
 export default function handler(
@@ -66,17 +99,21 @@ export default function handler(
       });
     }
 
-    const pin = String(req.body?.pin || "").trim();
-    const actor = pins[pin];
+    const pin = getPinFromRequest(req);
+    if (!pin) {
+      return res.status(401).json({ ok: false, error: "Wrong PIN" });
+    }
 
+    const actor = pins[pin];
     if (!actor) {
       return res.status(401).json({ ok: false, error: "Wrong PIN" });
     }
 
-    const admin = isAdminActor(actor);
-    const role: Role = admin ? "admin" : "user";
+    const adminPins = parseAdminPins(VTPT_ADMIN_PINS);
+    const isAdmin = adminPins.has(pin);
+    const role: Role = isAdmin ? "admin" : "user";
 
-    return res.status(200).json({ ok: true, actor, role, isAdmin: admin });
+    return res.status(200).json({ ok: true, actor, role, isAdmin });
   } catch (err: any) {
     return res
       .status(500)

@@ -476,6 +476,12 @@ export default async function handler(
 
       if (action === "delete") {
         payload.target = { id: targetId, date: targetDate };
+
+        // ✅ IMPORTANT: tell Apps Script we want a TRUE delete (remove row)
+        // Safe even if script ignores extra fields.
+        payload.deleteMode = "hard";
+        payload.hardDelete = true;
+        payload.logAction = "DELETE";
       } else {
         payload.dien = hasFiniteNumber(body.dien) ? Number(body.dien) : null;
         payload.nuoc = hasFiniteNumber(body.nuoc) ? Number(body.nuoc) : null;

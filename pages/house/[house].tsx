@@ -21,7 +21,7 @@ function latestKey(house: string) {
 }
 
 function cycleKey() {
-  return `vtpt_cycleMonth`;
+  return `vtpt_cycle_month`;
 }
 
 function safeJsonParse<T>(s: string | null): T | null {

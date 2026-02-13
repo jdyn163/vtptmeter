@@ -46,7 +46,10 @@ function historyKey(house: string) {
   return `vtpt_houseHistory_${house}`;
 }
 function cycleKey() {
-  return `vtpt_cycleMonth`;
+  return `vtpt_cycle_month`;
+}
+function deleteOutboxKey() {
+  return `vtpt_delete_outbox_v1`;
 }
 
 function safeJsonParse<T>(s: string | null): T | null {
@@ -117,6 +120,29 @@ function upsertHouseLatestCache(house: string, updated: Reading) {
   else data.push(updated);
 
   localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+}
+
+function removeHouseLatestIfMatch(
+  house: string,
+  room: string,
+  target: { id: number; date: string },
+) {
+  if (!house || !room) return;
+
+  const key = latestKey(house);
+  const cached = safeJsonParse<CacheEnvelope<Reading[]>>(
+    localStorage.getItem(key),
+  );
+  const data = Array.isArray(cached?.data) ? cached!.data.slice() : [];
+  const idx = data.findIndex((x) => x.room === room);
+
+  if (idx < 0) return;
+
+  const cur = data[idx];
+  if (cur && cur.id === target.id && cur.date === target.date) {
+    data.splice(idx, 1);
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  }
 }
 
 function writeHouseHistoryRoomListToCache(
@@ -212,6 +238,65 @@ function vnDayKey(iso: string): string {
 function isSameVNDay(aIso: string, bIso: string) {
   return vnDayKey(aIso) === vnDayKey(bIso);
 }
+
+/* ===================== Delete Outbox ===================== */
+type DeleteOutboxItem = {
+  kind: "delete";
+  room: string;
+  target: { id: number; date: string };
+  createdAt: number;
+  tries: number;
+};
+
+function readDeleteOutbox(): DeleteOutboxItem[] {
+  const raw = safeJsonParse<CacheEnvelope<DeleteOutboxItem[]>>(
+    localStorage.getItem(deleteOutboxKey()),
+  );
+  const list = Array.isArray(raw?.data) ? raw!.data : [];
+  return list.filter(
+    (x) =>
+      x &&
+      x.kind === "delete" &&
+      typeof x.room === "string" &&
+      x.target &&
+      typeof x.target.id === "number" &&
+      typeof x.target.date === "string",
+  );
+}
+
+function writeDeleteOutbox(list: DeleteOutboxItem[]) {
+  localStorage.setItem(
+    deleteOutboxKey(),
+    JSON.stringify({ savedAt: Date.now(), data: list }),
+  );
+}
+
+function enqueueDelete(room: string, target: { id: number; date: string }) {
+  if (!room) return;
+  const list = readDeleteOutbox();
+
+  // de-dupe (same room + same target)
+  const exists = list.some(
+    (x) =>
+      x.kind === "delete" &&
+      x.room === room &&
+      x.target.id === target.id &&
+      x.target.date === target.date,
+  );
+  if (exists) return;
+
+  list.unshift({
+    kind: "delete",
+    room,
+    target,
+    createdAt: Date.now(),
+    tries: 0,
+  });
+
+  // small cap
+  writeDeleteOutbox(list.slice(0, 80));
+}
+/* ========================================================= */
 
 function Field({
   label,
@@ -309,6 +394,9 @@ export default function RoomPage() {
   const syncTimerRef = useRef<number | null>(null);
   const syncSeqRef = useRef(0);
   const syncingRef = useRef(false);
+
+  // outbox control
+  const flushingDeletesRef = useRef(false);
 
   function setSyncingSafe(v: boolean) {
     syncingRef.current = v;
@@ -500,6 +588,94 @@ export default function RoomPage() {
     }
   }
 
+  async function flushDeleteOutbox() {
+    if (flushingDeletesRef.current) return;
+    flushingDeletesRef.current = true;
+
+    try {
+      const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
+      if (!pin) return;
+
+      let list = readDeleteOutbox();
+      if (!list.length) return;
+
+      // process oldest first (more fair)
+      list = list.slice().reverse();
+
+      for (const item of list) {
+        try {
+          const res = await fetch("/api/meter", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-vtpt-pin": pin,
+            },
+            body: JSON.stringify({
+              action: "delete",
+              room: item.room,
+              target: item.target,
+            }),
+            keepalive: true,
+          });
+
+          let j: any = null;
+          try {
+            j = await res.json();
+          } catch {
+            // ignore
+          }
+
+          if (j?.ok) {
+            // remove from outbox
+            const now = readDeleteOutbox();
+            const next = now.filter(
+              (x) =>
+                !(
+                  x.kind === "delete" &&
+                  x.room === item.room &&
+                  x.target.id === item.target.id &&
+                  x.target.date === item.target.date
+                ),
+            );
+            writeDeleteOutbox(next);
+          } else {
+            // bump tries + keep
+            const now = readDeleteOutbox();
+            const next = now.map((x) => {
+              if (
+                x.kind === "delete" &&
+                x.room === item.room &&
+                x.target.id === item.target.id &&
+                x.target.date === item.target.date
+              ) {
+                return { ...x, tries: (x.tries || 0) + 1 };
+              }
+              return x;
+            });
+            writeDeleteOutbox(next);
+          }
+        } catch {
+          // bump tries + keep
+          const now = readDeleteOutbox();
+          const next = now.map((x) => {
+            if (
+              x.kind === "delete" &&
+              x.room === item.room &&
+              x.target.id === item.target.id &&
+              x.target.date === item.target.date
+            ) {
+              return { ...x, tries: (x.tries || 0) + 1 };
+            }
+            return x;
+          });
+          writeDeleteOutbox(next);
+        }
+      }
+    } finally {
+      flushingDeletesRef.current = false;
+    }
+  }
+
   function scheduleSyncSoon() {
     if (syncTimerRef.current) {
       window.clearTimeout(syncTimerRef.current);
@@ -515,6 +691,9 @@ export default function RoomPage() {
     setSyncingSafe(true);
 
     try {
+      // ✅ first: flush queued deletes (survives fast navigation)
+      await flushDeleteOutbox();
+
       await Promise.all([
         refreshOverallLatestFromNetwork(),
         refreshHistoryFromNetwork(),
@@ -564,6 +743,11 @@ export default function RoomPage() {
 
     loadFromCaches();
     backgroundRefreshIfStale();
+
+    // ✅ If user deleted + navigated fast earlier, retry now.
+    // (No UI blocking. Worst case it fails and stays queued.)
+    void flushDeleteOutbox();
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
 
@@ -825,6 +1009,7 @@ export default function RoomPage() {
     setSaving(true);
 
     const deleting = editing;
+    const target = { id: deleting.id, date: deleting.date };
 
     // close UI immediately
     setShowSheet(false);
@@ -833,64 +1018,44 @@ export default function RoomPage() {
     setMsg(null);
 
     // optimistic remove
-    setHistory((prev) => {
-      const next = prev.filter(
+    const nextHistory = sortNewestFirst(
+      history.filter(
         (x) => !(x.id === deleting.id && x.date === deleting.date),
-      );
-      const sorted = sortNewestFirst(next).slice(0, 24);
-      if (house) writeHouseHistoryRoomListToCache(house, room, sorted);
-      return sorted;
-    });
+      ),
+    ).slice(0, 24);
+
+    setHistory(nextHistory);
+    if (house) writeHouseHistoryRoomListToCache(house, room, nextHistory);
+
+    // If the cached "latest for house page" was this exact row, remove it now.
+    // (Then the next sync will repopulate truth.)
+    if (house) removeHouseLatestIfMatch(house, room, target);
+
+    // If our "Last recorded" was this exact row, clear it now (avoid showing ghost info).
+    if (
+      latestOverall &&
+      latestOverall.id === target.id &&
+      latestOverall.date === target.date
+    ) {
+      setLatestOverall(null);
+    }
 
     showToast("Deleted ✅", 900);
 
+    // ✅ IMPORTANT: queue the delete so it survives fast navigation
+    enqueueDelete(room, target);
+
+    // Start syncing indicator (but do not block user)
     setSyncingSafe(true);
     window.setTimeout(() => {
       if (syncingRef.current) setToast("Syncing…");
     }, 350);
 
-    const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
-    if (!pin) {
-      setMsg("Missing PIN. Please go back and unlock again.");
-      setSyncingSafe(false);
-      setSaving(false);
-      return;
-    }
+    // Fire immediately (best effort), but the queue is the real guarantee
+    void flushDeleteOutbox();
 
-    fetch("/api/meter", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-vtpt-pin": pin,
-      },
-      body: JSON.stringify({
-        action: "delete",
-        room,
-        target: { id: deleting.id, date: deleting.date },
-      }),
-      keepalive: true,
-    })
-      .then(async (res) => {
-        let j: any = null;
-        try {
-          j = await res.json();
-        } catch {
-          // ignore
-        }
-        if (!j?.ok) {
-          setMsg(j?.error || "Delete failed.");
-          setSyncingSafe(false);
-          showToast("Sync failed ⚠️", 1200);
-          scheduleSyncSoon();
-          return;
-        }
-        scheduleSyncSoon();
-      })
-      .catch(() => {
-        setSyncingSafe(false);
-        showToast("Sync failed ⚠️", 1200);
-        scheduleSyncSoon();
-      });
+    // Then do a truth sync soon (history/latest)
+    scheduleSyncSoon();
 
     setSaving(false);
   }

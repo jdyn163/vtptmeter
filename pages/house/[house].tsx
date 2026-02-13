@@ -20,6 +20,10 @@ function latestKey(house: string) {
   return `vtpt_houseLatest_${house}`;
 }
 
+function historyKey(house: string) {
+  return `vtpt_houseHistory_${house}`;
+}
+
 function cycleKey() {
   return `vtpt_cycle_month`;
 }
@@ -106,13 +110,16 @@ export default function HousePage() {
     const list = all[house] || [];
     setRooms(list);
 
-    // 2) load caches immediately
+    // 2) load caches immediately (cycle + latest + history)
     const cachedCycle = safeJsonParse<CacheEnvelope<string>>(
       localStorage.getItem(cycleKey()),
     );
     const cachedLatest = safeJsonParse<CacheEnvelope<Reading[]>>(
       localStorage.getItem(latestKey(house)),
     );
+    const cachedHistory = safeJsonParse<
+      CacheEnvelope<Record<string, Reading[]>>
+    >(localStorage.getItem(historyKey(house)));
 
     if (cachedCycle?.data) setCycleMonth(String(cachedCycle.data));
 
@@ -128,20 +135,26 @@ export default function HousePage() {
       ? `Cycle ${cachedCycle.data}`
       : "Cycle —";
     const latestStamp = cachedLatest?.savedAt;
+    const histStamp = cachedHistory?.savedAt;
 
-    if (latestStamp || cachedCycle?.savedAt) {
+    if (latestStamp || cachedCycle?.savedAt || histStamp) {
       setStatus(
-        `${cycleText} • Cached: latest ${latestStamp ? timeText(latestStamp) : "—"}`,
+        `${cycleText} • Cached: latest ${latestStamp ? timeText(latestStamp) : "—"} • history ${histStamp ? timeText(histStamp) : "—"}`,
       );
     } else {
       setStatus(`${cycleText} • No cache yet`);
     }
 
     // first paint: if no cache at all, show "loading"
-    const hasAnyCache = !!(cachedCycle?.data || cachedLatest?.data?.length);
+    const hasAnyCache = !!(
+      cachedCycle?.data ||
+      cachedLatest?.data?.length ||
+      cachedHistory?.data
+    );
     setLoading(!hasAnyCache);
 
     // 3) background refresh (FAST: only cycleGet + houseCycleLatest)
+    // 4) prefetch (background): houseHistory to make room pages instant
     (async () => {
       setRefreshing(true);
 
@@ -186,6 +199,29 @@ export default function HousePage() {
         setStatus(
           `${cycleLabel} • Updated (${new Date().toLocaleTimeString()})`,
         );
+
+        // 🔥 Prefetch history (do not block UI / do not change "refreshing" UX)
+        // Goal: Room page loads instantly from cache, no fetch needed.
+        window.setTimeout(() => {
+          fetch(
+            `/api/meter?action=houseHistory&house=${encodeURIComponent(
+              house,
+            )}&limitPerRoom=24`,
+            { signal: ac.signal },
+          )
+            .then((r) => r.json())
+            .then((j) => {
+              const data: Record<string, Reading[]> =
+                j && j.ok && j.data ? j.data : {};
+              localStorage.setItem(
+                historyKey(house),
+                JSON.stringify({ savedAt: Date.now(), data }),
+              );
+            })
+            .catch(() => {
+              // ignore
+            });
+        }, 0);
       } catch {
         const cycleLabel = cycleMonth ? `Cycle ${cycleMonth}` : "Cycle —";
         setStatus(`${cycleLabel} • Fetch failed (using cache)`);

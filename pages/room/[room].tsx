@@ -1800,7 +1800,7 @@ export default function RoomPage() {
               onClick={commitSaveReading}
               disabled={saving}
               style={{
-                padding: 12,
+                padding: 13,
                 borderRadius: 12,
                 border: "1px solid #111",
                 background: saving ? "#ddd" : "#111",

@@ -51,9 +51,6 @@ function cycleKey() {
 function deleteOutboxKey() {
   return `vtpt_delete_outbox_v1`;
 }
-function writeOutboxKey() {
-  return `vtpt_write_outbox_v1`;
-}
 
 function safeJsonParse<T>(s: string | null): T | null {
   if (!s) return null;
@@ -242,18 +239,6 @@ function isSameVNDay(aIso: string, bIso: string) {
   return vnDayKey(aIso) === vnDayKey(bIso);
 }
 
-function makeId(): string {
-  try {
-    // @ts-ignore
-    return typeof crypto !== "undefined" && crypto.randomUUID
-      ? // @ts-ignore
-        crypto.randomUUID()
-      : `id_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  } catch {
-    return `id_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  }
-}
-
 /* ===================== Delete Outbox ===================== */
 type DeleteOutboxItem = {
   kind: "delete";
@@ -310,64 +295,6 @@ function enqueueDelete(room: string, target: { id: number; date: string }) {
 
   // small cap
   writeDeleteOutbox(list.slice(0, 80));
-}
-/* ========================================================= */
-
-/* ===================== Write Outbox ===================== */
-type WriteAction = "save" | "update";
-
-type WriteOutboxItem = {
-  kind: "write";
-  id: string;
-  createdAt: number;
-  tries: number;
-  payload: {
-    action: WriteAction;
-    room: string;
-    dien: number | null;
-    nuoc: number | null;
-    note: string;
-    target?: { id: number; date: string };
-  };
-};
-
-function readWriteOutbox(): WriteOutboxItem[] {
-  const raw = safeJsonParse<CacheEnvelope<WriteOutboxItem[]>>(
-    localStorage.getItem(writeOutboxKey()),
-  );
-  const list = Array.isArray(raw?.data) ? raw!.data : [];
-  return list.filter(
-    (x) =>
-      x &&
-      x.kind === "write" &&
-      typeof x.id === "string" &&
-      x.payload &&
-      typeof x.payload.room === "string" &&
-      (x.payload.action === "save" || x.payload.action === "update"),
-  );
-}
-
-function writeWriteOutbox(list: WriteOutboxItem[]) {
-  localStorage.setItem(
-    writeOutboxKey(),
-    JSON.stringify({ savedAt: Date.now(), data: list }),
-  );
-}
-
-function enqueueWrite(item: WriteOutboxItem["payload"]) {
-  if (!item?.room) return;
-  const list = readWriteOutbox();
-
-  list.unshift({
-    kind: "write",
-    id: makeId(),
-    createdAt: Date.now(),
-    tries: 0,
-    payload: item,
-  });
-
-  // cap (writes can pile up)
-  writeWriteOutbox(list.slice(0, 120));
 }
 /* ========================================================= */
 
@@ -470,7 +397,6 @@ export default function RoomPage() {
 
   // outbox control
   const flushingDeletesRef = useRef(false);
-  const flushingWritesRef = useRef(false);
 
   function setSyncingSafe(v: boolean) {
     syncingRef.current = v;
@@ -662,71 +588,6 @@ export default function RoomPage() {
     }
   }
 
-  async function flushWriteOutbox() {
-    if (flushingWritesRef.current) return;
-    flushingWritesRef.current = true;
-
-    try {
-      const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
-      if (!pin) return;
-
-      let list = readWriteOutbox();
-      if (!list.length) return;
-
-      // process oldest first (more fair)
-      list = list.slice().reverse();
-
-      for (const item of list) {
-        try {
-          const res = await fetch("/api/meter", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-vtpt-pin": pin,
-            },
-            body: JSON.stringify(item.payload),
-            keepalive: true,
-          });
-
-          let j: any = null;
-          try {
-            j = await res.json();
-          } catch {
-            // ignore
-          }
-
-          if (j?.ok) {
-            const now = readWriteOutbox();
-            const next = now.filter(
-              (x) => !(x.kind === "write" && x.id === item.id),
-            );
-            writeWriteOutbox(next);
-          } else {
-            const now = readWriteOutbox();
-            const next = now.map((x) => {
-              if (x.kind === "write" && x.id === item.id) {
-                return { ...x, tries: (x.tries || 0) + 1 };
-              }
-              return x;
-            });
-            writeWriteOutbox(next);
-          }
-        } catch {
-          const now = readWriteOutbox();
-          const next = now.map((x) => {
-            if (x.kind === "write" && x.id === item.id) {
-              return { ...x, tries: (x.tries || 0) + 1 };
-            }
-            return x;
-          });
-          writeWriteOutbox(next);
-        }
-      }
-    } finally {
-      flushingWritesRef.current = false;
-    }
-  }
-
   async function flushDeleteOutbox() {
     if (flushingDeletesRef.current) return;
     flushingDeletesRef.current = true;
@@ -830,8 +691,7 @@ export default function RoomPage() {
     setSyncingSafe(true);
 
     try {
-      // ✅ first: flush queued writes & deletes (survives fast navigation/offline)
-      await flushWriteOutbox();
+      // ✅ first: flush queued deletes (survives fast navigation)
       await flushDeleteOutbox();
 
       await Promise.all([
@@ -884,49 +744,12 @@ export default function RoomPage() {
     loadFromCaches();
     backgroundRefreshIfStale();
 
-    // ✅ If user saved/deleted + navigated fast earlier, retry now.
+    // ✅ If user deleted + navigated fast earlier, retry now.
     // (No UI blocking. Worst case it fails and stays queued.)
-    void flushWriteOutbox();
     void flushDeleteOutbox();
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room, house]);
-
-  // ✅ NEW: auto-flush when network comes back or when tab becomes visible again
-  useEffect(() => {
-    function onOnline() {
-      // Don’t block UI; just nudge sync.
-      if (!room) return;
-      setSyncingSafe(true);
-      void flushWriteOutbox();
-      void flushDeleteOutbox();
-      scheduleSyncSoon();
-    }
-
-    function onVisibility() {
-      if (document.visibilityState !== "visible") return;
-      if (!room) return;
-
-      // If there’s anything pending, flush it.
-      const hasPending =
-        readWriteOutbox().length > 0 || readDeleteOutbox().length > 0;
-      if (!hasPending) return;
-
-      setSyncingSafe(true);
-      void flushWriteOutbox();
-      void flushDeleteOutbox();
-      scheduleSyncSoon();
-    }
-
-    window.addEventListener("online", onOnline);
-    document.addEventListener("visibilitychange", onVisibility);
-
-    return () => {
-      window.removeEventListener("online", onOnline);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room]);
 
   useEffect(() => {
     if (tab === "log") refreshLogFromNetwork();
@@ -1027,6 +850,50 @@ export default function RoomPage() {
     setShowConfirmSheet(true);
   }
 
+  async function fireAndForgetWrite(payload: any) {
+    const pin = (sessionStorage.getItem("vtpt_pin") || "").trim();
+    if (!pin) {
+      setMsg("Missing PIN. Please go back and unlock again.");
+      setSyncingSafe(false);
+      return;
+    }
+
+    // keepalive helps when user navigates immediately
+    fetch("/api/meter", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-vtpt-pin": pin,
+      },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    })
+      .then(async (res) => {
+        let j: any = null;
+        try {
+          j = await res.json();
+        } catch {
+          // ignore
+        }
+
+        if (!j?.ok) {
+          setMsg(j?.error || "Save failed.");
+          setSyncingSafe(false);
+          showToast("Sync failed ⚠️", 1200);
+          scheduleSyncSoon();
+          return;
+        }
+
+        // Success: schedule a truth sync (replaces temp id / ensures stamps)
+        scheduleSyncSoon();
+      })
+      .catch(() => {
+        setSyncingSafe(false);
+        showToast("Sync failed ⚠️", 1200);
+        scheduleSyncSoon();
+      });
+  }
+
   async function commitSaveReading() {
     setMsg(null);
 
@@ -1114,9 +981,14 @@ export default function RoomPage() {
 
     showToast("Saved ✅", 900);
 
-    // ✅ enqueue write so it survives offline / fast navigation
-    const action: WriteAction = willUpdate ? "update" : "save";
-    enqueueWrite({
+    // ✅ background sync starts immediately, no UI blocking
+    setSyncingSafe(true);
+    window.setTimeout(() => {
+      if (syncingRef.current) setToast("Syncing…");
+    }, 350);
+
+    const action = willUpdate ? "update" : "save";
+    void fireAndForgetWrite({
       action,
       room,
       dien: dienNum,
@@ -1124,18 +996,6 @@ export default function RoomPage() {
       note: noteInput.trim(),
       target: willUpdate ? targetForUpdate : undefined,
     });
-
-    // ✅ background sync indicator (but do not block user)
-    setSyncingSafe(true);
-    window.setTimeout(() => {
-      if (syncingRef.current) setToast("Syncing…");
-    }, 350);
-
-    // Best effort immediate flush (queue is the guarantee)
-    void flushWriteOutbox();
-
-    // Then do a truth sync soon (history/latest) to pull real IDs/stamps
-    scheduleSyncSoon();
 
     setSaving(false);
   }
@@ -1800,7 +1660,7 @@ export default function RoomPage() {
               onClick={commitSaveReading}
               disabled={saving}
               style={{
-                padding: 13,
+                padding: 12,
                 borderRadius: 12,
                 border: "1px solid #111",
                 background: saving ? "#ddd" : "#111",

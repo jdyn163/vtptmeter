@@ -1,3 +1,4 @@
+// pages/api/meter.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
 const SCRIPT_URL = process.env.SCRIPT_URL;
@@ -477,8 +478,7 @@ export default async function handler(
       if (action === "delete") {
         payload.target = { id: targetId, date: targetDate };
 
-        // ✅ IMPORTANT: tell Apps Script we want a TRUE delete (remove row)
-        // Safe even if script ignores extra fields.
+        // ✅ Extra hints to Apps Script (safe if ignored)
         payload.deleteMode = "hard";
         payload.hardDelete = true;
         payload.logAction = "DELETE";
@@ -499,6 +499,30 @@ export default async function handler(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
+      // ---- Normalize save response for UI (RoomPage expects id/time/cycle) ----
+      if (json && json.ok && action === "save") {
+        // Accept either:
+        // { ok:true, id, time, cycle } OR { ok:true, data:{ id, time, cycle } }
+        const src =
+          json &&
+          typeof json === "object" &&
+          json.data &&
+          typeof json.data === "object"
+            ? json.data
+            : json;
+
+        const id =
+          typeof src?.id === "number" && Number.isFinite(src.id)
+            ? src.id
+            : undefined;
+        const time = typeof src?.time === "string" ? src.time : undefined;
+        const cycleOut = typeof src?.cycle === "string" ? src.cycle : undefined;
+
+        if (id !== undefined) (json as any).id = id;
+        if (time !== undefined) (json as any).time = time;
+        if (cycleOut !== undefined) (json as any).cycle = cycleOut;
+      }
 
       if (json && json.ok) cacheClearAll();
 

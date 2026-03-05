@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, X, RefreshCw } from 'lucide-react'
+import { ChevronLeft, X, RefreshCw, Zap, Droplet, ClipboardList } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { formatDateTime, formatDateString, nowVN } from '../utils/time'
@@ -81,7 +81,7 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[480px] bg-white rounded-t-3xl p-6 pb-10"
+        className="w-full max-w-[480px] bg-white rounded-t-3xl p-6 pb-10 modal-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
@@ -98,26 +98,26 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
 
         <div className="flex flex-col gap-4">
           <div>
-            <label className="text-xs text-gray-500 mb-1 block">Điện (kWh)</label>
+            <label className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Zap size={11} className="text-amber-400" />Điện (kWh)</label>
             <input
               type="number"
               inputMode="numeric"
               value={dien}
               onChange={(e) => setDien(e.target.value)}
               placeholder="Nhập số điện"
-              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-gray-900"
+              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600"
             />
           </div>
 
           <div>
-            <label className="text-xs text-gray-500 mb-1 block">Nước (m³)</label>
+            <label className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Droplet size={11} className="text-blue-400" />Nước (m³)</label>
             <input
               type="number"
               inputMode="numeric"
               value={nuoc}
               onChange={(e) => setNuoc(e.target.value)}
               placeholder="Nhập số nước"
-              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-gray-900"
+              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600"
             />
           </div>
 
@@ -128,7 +128,7 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="ie. thay đồng hồ"
-              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-gray-900"
+              className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-600"
             />
           </div>
 
@@ -144,7 +144,7 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="flex-1 bg-gray-900 text-white font-semibold py-3.5 rounded-xl text-sm disabled:opacity-50"
+              className="flex-1 bg-blue-600 text-white font-semibold py-3.5 rounded-xl text-sm disabled:opacity-50"
             >
               {saving ? 'Đang lưu...' : 'Lưu'}
             </button>
@@ -194,7 +194,7 @@ function EditDeleteSheet({ reading, roomId, user, onEdit, onDeleted, onClose }) 
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[480px] bg-white rounded-t-3xl p-6 pb-10"
+        className="w-full max-w-[480px] bg-white rounded-t-3xl p-6 pb-10 modal-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-5">
@@ -258,7 +258,6 @@ export default function RoomDetailPage() {
   const { houseId, roomId } = useParams()
   const navigate = useNavigate()
   const { user } = useAuth()
-
   const [activeCycle, setActiveCycle] = useState(null)
   const [currentReading, setCurrentReading] = useState(null)
   const [allReadings, setAllReadings] = useState([])
@@ -329,6 +328,7 @@ export default function RoomDetailPage() {
   useEffect(() => { fetchData() }, [roomId])
 
   function openCardModal() {
+    if (!activeCycle) return
     setRecordReading(currentReading)
     setRecordCycleId(activeCycle)
     setRecordOpen(true)
@@ -389,7 +389,7 @@ export default function RoomDetailPage() {
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-bold text-gray-900">{roomId}</h1>
                 {activeCycle && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
                     {activeCycle}
                   </span>
                 )}
@@ -415,9 +415,10 @@ export default function RoomDetailPage() {
               <div className="flex flex-col gap-3 mb-3">
                 <button
                   onClick={openCardModal}
-                  className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-4 text-left active:bg-gray-50 transition-colors shadow-sm"
+                  disabled={!activeCycle}
+                  className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-4 text-left transition active:scale-[0.98] active:bg-gray-50 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <p className="text-xs text-gray-400 mb-2">Số Điện</p>
+                  <p className="text-xs text-gray-400 mb-2 flex items-center gap-1"><Zap size={11} className="text-amber-400" />Số Điện</p>
                   <div className="flex items-baseline gap-2">
                     <span className="text-4xl font-bold text-gray-900 leading-none">
                       {currentReading?.dien != null ? currentReading.dien : '---.-'}
@@ -428,9 +429,10 @@ export default function RoomDetailPage() {
 
                 <button
                   onClick={openCardModal}
-                  className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-4 text-left active:bg-gray-50 transition-colors shadow-sm"
+                  disabled={!activeCycle}
+                  className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-4 text-left transition active:scale-[0.98] active:bg-gray-50 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <p className="text-xs text-gray-400 mb-2">Số Nước</p>
+                  <p className="text-xs text-gray-400 mb-2 flex items-center gap-1"><Droplet size={11} className="text-blue-400" />Số Nước</p>
                   <div className="flex items-baseline gap-2">
                     <span className="text-4xl font-bold text-gray-900 leading-none">
                       {currentReading?.nuoc != null ? currentReading.nuoc : '---.-'}
@@ -456,20 +458,20 @@ export default function RoomDetailPage() {
               {/* Tab pills — full width segmented control */}
               <div className="flex gap-2 mb-4">
                 {[
-                  { key: 'dien', label: 'Điện' },
-                  { key: 'nuoc', label: 'Nước' },
-                  { key: 'log', label: 'Log' },
+                  { key: 'dien', label: 'Điện', icon: <Zap size={13} /> },
+                  { key: 'nuoc', label: 'Nước', icon: <Droplet size={13} /> },
+                  { key: 'log', label: 'Log', icon: <ClipboardList size={13} /> },
                 ].map((tab) => (
                   <button
                     key={tab.key}
                     onClick={() => setActiveTab(tab.key)}
-                    className={`flex-1 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                    className={`flex-1 py-1.5 rounded-full text-sm font-medium transition-colors flex items-center justify-center gap-1 ${
                       activeTab === tab.key
-                        ? 'bg-gray-900 text-white'
+                        ? 'bg-blue-600 text-white'
                         : 'text-gray-400 hover:text-gray-600'
                     }`}
                   >
-                    {tab.label}
+                    {tab.icon}{tab.label}
                   </button>
                 ))}
               </div>
@@ -525,7 +527,7 @@ export default function RoomDetailPage() {
                     </div>
 
                     {logs.length === 0 ? (
-                      <p className="text-center text-gray-400 py-8 text-sm">Chưa có log</p>
+                      <p className="text-center text-gray-400 py-8 text-sm">Chưa có dữ liệu</p>
                     ) : (
                       <div>
                         {logs.map((log) => (

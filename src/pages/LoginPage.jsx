@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Building2 } from 'lucide-react'
 import { loginWithPin } from '../lib/auth'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -80,6 +81,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Title */}
         <div className="text-center mb-8">
+          <Building2 size={36} className="text-blue-600 mx-auto mb-3" />
           <h1 className="text-4xl font-bold text-gray-900 tracking-tight">VTPT Meter</h1>
           <p className="mt-2 text-gray-500 text-sm">Nhập mã PIN 4 chữ số của bạn</p>
         </div>

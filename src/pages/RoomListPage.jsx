@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft } from 'lucide-react'
+import { ChevronLeft, CheckCircle, CircleAlert, Zap, Droplet } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { formatDateTime } from '../utils/time'
 import { getRoomStatus } from '../utils/roomStatus'
 
 function StatusDot({ status }) {
   if (status === 'ok') {
-    return <span className="w-3 h-3 rounded-full bg-green-500 shrink-0" />
+    return <CheckCircle size={15} className="text-green-500 shrink-0" />
   }
   if (status === 'flagged') {
-    return <span className="w-3 h-3 rounded-full bg-amber-400 shrink-0" />
+    return <CircleAlert size={15} className="text-amber-400 shrink-0" />
   }
   return null // not yet recorded — no space reserved
 }
@@ -117,7 +117,7 @@ export default function RoomListPage() {
             </button>
             <h1 className="text-2xl font-bold text-gray-900">Dãy {houseId}</h1>
             {activeCycle && (
-              <span className="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-600">
+              <span className="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
                 {activeCycle}
               </span>
             )}
@@ -147,28 +147,26 @@ export default function RoomListPage() {
                   <button
                     key={id}
                     onClick={() => navigate(`/house/${houseId}/room/${id}`)}
-                    className="w-full flex items-center gap-3 px-4 py-3.5 bg-white rounded-2xl
-                               border border-gray-100 shadow-sm active:bg-gray-50
-                               text-left transition-colors"
+                    className="w-full flex items-center gap-3 px-5 py-4 bg-white rounded-2xl border border-gray-100 shadow-sm text-left transition active:scale-[0.98] active:bg-gray-50"
                   >
                     {/* Left: status + room ID */}
                     <div className="flex items-center gap-2 flex-1 min-w-0">
                       <StatusDot status={status} />
-                      <span className="font-semibold text-gray-900 text-sm truncate">{id}</span>
+                      <span className="font-bold text-gray-900 text-base truncate">{id}</span>
                     </div>
 
                     {/* Middle: Điện */}
                     <div className="flex flex-col items-center w-16 shrink-0">
-                      <span className="text-[10px] text-gray-400 leading-none mb-0.5">Điện</span>
-                      <span className="font-bold text-gray-900 text-sm leading-none">
+                      <span className="flex items-center gap-0.5 text-[10px] text-gray-400 leading-none mb-1"><Zap size={10} className="text-amber-400" />Điện</span>
+                      <span className="font-bold text-gray-900 text-base leading-none">
                         {reading?.dien != null ? reading.dien : '---'}
                       </span>
                     </div>
 
                     {/* Right: Nước */}
                     <div className="flex flex-col items-center w-16 shrink-0">
-                      <span className="text-[10px] text-gray-400 leading-none mb-0.5">Nước</span>
-                      <span className="font-bold text-gray-900 text-sm leading-none">
+                      <span className="flex items-center gap-0.5 text-[10px] text-gray-400 leading-none mb-1"><Droplet size={10} className="text-blue-400" />Nước</span>
+                      <span className="font-bold text-gray-900 text-base leading-none">
                         {reading?.nuoc != null ? reading.nuoc : '---'}
                       </span>
                     </div>

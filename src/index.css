@@ -1,6 +1,11 @@
 @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
 :root {
   font-family: 'Be Vietnam Pro', sans-serif;
 }
@@ -13,4 +18,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background-color: #f5f5f5;
+}
+
+.modal-slide-up {
+  animation: slideUp 0.22s ease-out;
 }

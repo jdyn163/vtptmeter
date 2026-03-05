@@ -62,19 +62,22 @@ export default function SettingsPage() {
   async function handleSwitchCycle(id) {
     setSwitchingId(id);
     setCycleError("");
+    // Activate target first — if this fails, nothing changes
     const { error: e1 } = await supabase
       .from("cycles")
-      .update({ status: "closed" })
-      .eq("status", "active");
+      .update({ status: "active" })
+      .eq("id", id);
     if (e1) {
       setCycleError("Lỗi chuyển chu kỳ.");
       setSwitchingId(null);
       return;
     }
+    // Then close all other active cycles
     const { error: e2 } = await supabase
       .from("cycles")
-      .update({ status: "active" })
-      .eq("id", id);
+      .update({ status: "closed" })
+      .eq("status", "active")
+      .neq("id", id);
     if (e2) {
       setCycleError("Lỗi chuyển chu kỳ.");
       setSwitchingId(null);
@@ -93,10 +96,7 @@ export default function SettingsPage() {
     }
     setCycleWorking(true);
     setCycleError("");
-    await supabase
-      .from("cycles")
-      .update({ status: "closed" })
-      .eq("status", "active");
+    // Insert new cycle as active first — if this fails, nothing changes
     const { error } = await supabase
       .from("cycles")
       .insert({ id, status: "active", created_by: user.id });
@@ -107,6 +107,12 @@ export default function SettingsPage() {
       setCycleWorking(false);
       return;
     }
+    // Then close all previously active cycles
+    await supabase
+      .from("cycles")
+      .update({ status: "closed" })
+      .eq("status", "active")
+      .neq("id", id);
     setNewCycleId("");
     setCycleWorking(false);
     setCycleModalOpen(false);
@@ -217,7 +223,7 @@ export default function SettingsPage() {
                 onClick={() => setCycleModalOpen(false)}
               >
                 <div
-                  className="w-full max-w-[480px] bg-white rounded-t-3xl flex flex-col max-h-[80vh]"
+                  className="w-full max-w-[480px] bg-white rounded-t-3xl flex flex-col max-h-[80vh] modal-slide-up"
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
@@ -275,12 +281,12 @@ export default function SettingsPage() {
                     setCycleError("");
                   }}
                   placeholder="YYYY-MM (ie. 2026-04)"
-                  className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-gray-900"
+                  className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-blue-600"
                 />
                 <button
                   onClick={handleCreateCycle}
                   disabled={cycleWorking}
-                  className="bg-gray-900 text-white text-sm font-medium px-4 py-2.5 rounded-xl disabled:opacity-50"
+                  className="bg-blue-600 text-white text-sm font-medium px-4 py-2.5 rounded-xl disabled:opacity-50"
                 >
                   {cycleWorking ? "..." : "Thêm"}
                 </button>
@@ -310,7 +316,7 @@ export default function SettingsPage() {
                       setUserError("");
                     }}
                     placeholder="PIN"
-                    className="w-24 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-gray-900 font-mono tracking-widest text-center"
+                    className="w-24 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-blue-600 font-mono tracking-widest text-center"
                   />
                   <input
                     type="text"
@@ -320,7 +326,7 @@ export default function SettingsPage() {
                       setUserError("");
                     }}
                     placeholder="Tên hiển thị"
-                    className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-gray-900"
+                    className="flex-1 border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-blue-600"
                   />
                 </div>
                 <div className="flex gap-2">
@@ -335,7 +341,7 @@ export default function SettingsPage() {
                         onClick={() => setNewRole(r.value)}
                         className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
                           newRole === r.value
-                            ? "bg-gray-900 text-white"
+                            ? "bg-blue-600 text-white"
                             : "text-gray-400"
                         }`}
                       >
@@ -346,7 +352,7 @@ export default function SettingsPage() {
                   <button
                     onClick={handleAddUser}
                     disabled={userWorking}
-                    className="bg-gray-900 text-white text-sm font-semibold px-5 py-2.5 rounded-xl disabled:opacity-50"
+                    className="bg-blue-600 text-white text-sm font-semibold px-5 py-2.5 rounded-xl disabled:opacity-50"
                   >
                     {userWorking ? "..." : "Thêm"}
                   </button>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings, LogOut } from 'lucide-react'
+import { Settings, LogOut, CircleAlert } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { supabase } from '../lib/supabase'
 import { formatDateTime } from '../utils/time'
@@ -104,7 +104,7 @@ export default function HomePage() {
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {/* Cycle badge */}
             {activeCycle ? (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-200 text-gray-700">
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
                 {activeCycle}
               </span>
             ) : (
@@ -154,13 +154,11 @@ export default function HomePage() {
           <button
             key={house}
             onClick={() => navigate(`/house/${house}`)}
-            className="w-full flex items-center justify-between px-5 py-4 bg-white rounded-2xl
-                       shadow-sm border border-gray-100 active:bg-gray-50
-                       text-left transition-colors"
+            className="w-full flex items-center justify-between px-5 py-4 bg-white rounded-2xl shadow-sm border border-gray-100 text-left transition active:scale-[0.98] active:bg-gray-50"
           >
             <div className="flex items-center gap-2.5">
               {flaggedHouses.has(house) && (
-                <span className="w-3 h-3 rounded-full bg-amber-400 shrink-0" />
+                <CircleAlert size={16} className="text-amber-400 shrink-0" />
               )}
               <span className="text-xl font-bold text-gray-900">{house}</span>
             </div>

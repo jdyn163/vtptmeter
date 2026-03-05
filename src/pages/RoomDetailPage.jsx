@@ -504,8 +504,8 @@ export default function RoomDetailPage() {
                           <span className="flex-1 text-center text-sm font-semibold text-gray-900">
                             {r[activeTab]}
                           </span>
-                          <span className="flex-1 text-right text-sm font-semibold text-green-500">
-                            {r.diff != null ? `+${r.diff}` : '--'}
+                          <span className={`flex-1 text-right text-sm font-semibold ${r.diff == null ? 'text-gray-400' : r.diff >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                            {r.diff == null ? '--' : r.diff >= 0 ? `+${r.diff}` : `${r.diff}`}
                           </span>
                         </button>
                       ))}

@@ -65,13 +65,34 @@ export default function RoomListPage() {
         .eq('cycle_id', cycleId)
         .like('room_id', `${houseId}-%`)
 
-      // 4. Merge readings into rooms
+      // 4. Previous cycle (most recent closed cycle before the active one)
+      const { data: prevCycleData } = await supabase
+        .from('cycles')
+        .select('id')
+        .eq('status', 'closed')
+        .lt('id', cycleId)
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      const prevReadingsByRoom = {}
+      if (prevCycleData) {
+        const { data: prevReadingsData } = await supabase
+          .from('readings')
+          .select('room_id, dien, nuoc')
+          .eq('cycle_id', prevCycleData.id)
+          .like('room_id', `${houseId}-%`)
+        prevReadingsData?.forEach((r) => { prevReadingsByRoom[r.room_id] = r })
+      }
+
+      // 5. Merge readings into rooms
       const readingsByRoom = {}
       readingsData?.forEach((r) => { readingsByRoom[r.room_id] = r })
 
       setRooms(roomsData.map((room) => ({
         id: room.id,
         reading: readingsByRoom[room.id] ?? null,
+        prevReading: prevReadingsByRoom[room.id] ?? null,
       })))
       setFetchedAt(new Date())
       setLoading(false)
@@ -120,8 +141,8 @@ export default function RoomListPage() {
 
           {!loading && !error && (
             <div className="flex flex-col gap-2">
-              {rooms.map(({ id, reading }) => {
-                const status = getRoomStatus(reading)
+              {rooms.map(({ id, reading, prevReading }) => {
+                const status = getRoomStatus(reading, prevReading)
                 return (
                   <button
                     key={id}

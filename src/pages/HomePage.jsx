@@ -13,6 +13,7 @@ export default function HomePage() {
   const navigate = useNavigate()
   const [activeCycle, setActiveCycle] = useState(null)
   const [flaggedHouses, setFlaggedHouses] = useState(new Set())
+  const [houseProgress, setHouseProgress] = useState({}) // { A0: { recorded: 4, total: 6 }, ... }
   const [fetchedAt, setFetchedAt] = useState(null)
   const [error, setError] = useState('')
 
@@ -56,7 +57,12 @@ export default function HomePage() {
         prevReadings?.forEach((r) => { prevByRoom[r.room_id] = r })
       }
 
-      // Determine flagged houses
+      // All rooms (for totals per house)
+      const { data: allRooms } = await supabase
+        .from('rooms')
+        .select('id, house_id')
+
+      // Determine flagged houses + progress
       const currByRoom = {}
       currReadings?.forEach((r) => { currByRoom[r.room_id] = r })
 
@@ -68,6 +74,15 @@ export default function HomePage() {
         }
       })
       setFlaggedHouses(flagged)
+
+      // Compute recorded/total per house
+      const progress = {}
+      allRooms?.forEach((r) => {
+        if (!progress[r.house_id]) progress[r.house_id] = { recorded: 0, total: 0 }
+        progress[r.house_id].total += 1
+        if (currByRoom[r.id]) progress[r.house_id].recorded += 1
+      })
+      setHouseProgress(progress)
       setFetchedAt(new Date())
     }
     fetchData()
@@ -149,15 +164,22 @@ export default function HomePage() {
               )}
               <span className="text-xl font-bold text-gray-900">{house}</span>
             </div>
-            <svg
-              className="w-5 h-5 text-gray-400"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              viewBox="0 0 24 24"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
+            <div className="flex items-center gap-2">
+              {houseProgress[house] && (
+                <span className="text-sm font-medium text-gray-400">
+                  {houseProgress[house].recorded}/{houseProgress[house].total}
+                </span>
+              )}
+              <svg
+                className="w-5 h-5 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </div>
           </button>
         ))}
       </div>

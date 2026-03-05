@@ -420,11 +420,9 @@ export default function RoomDetailPage() {
                   <p className="text-xs text-gray-400 mb-2">Số Điện</p>
                   <div className="flex items-baseline gap-2">
                     <span className="text-4xl font-bold text-gray-900 leading-none">
-                      {currentReading?.dien != null ? currentReading.dien : '---'}
+                      {currentReading?.dien != null ? currentReading.dien : '---.-'}
                     </span>
-                    {currentReading?.dien != null && (
-                      <span className="text-sm text-gray-400">kWh</span>
-                    )}
+                    <span className="text-sm text-gray-400">kWh</span>
                   </div>
                 </button>
 
@@ -435,11 +433,9 @@ export default function RoomDetailPage() {
                   <p className="text-xs text-gray-400 mb-2">Số Nước</p>
                   <div className="flex items-baseline gap-2">
                     <span className="text-4xl font-bold text-gray-900 leading-none">
-                      {currentReading?.nuoc != null ? currentReading.nuoc : '---'}
+                      {currentReading?.nuoc != null ? currentReading.nuoc : '---.-'}
                     </span>
-                    {currentReading?.nuoc != null && (
-                      <span className="text-sm text-gray-400">m³</span>
-                    )}
+                    <span className="text-sm text-gray-400">m³</span>
                   </div>
                 </button>
               </div>

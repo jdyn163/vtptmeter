@@ -451,7 +451,7 @@ export default function RoomDetailPage() {
               })()}
 
               {/* Section label */}
-              <p className="text-base font-bold text-gray-900 mb-3 mt-6">History</p>
+              <p className="text-base font-bold text-gray-900 mb-3 mt-6">Dữ Liệu</p>
 
               {/* Tab pills — full width segmented control */}
               <div className="flex gap-2 mb-4">

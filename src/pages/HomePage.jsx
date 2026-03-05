@@ -4,6 +4,7 @@ import { Settings, LogOut } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { supabase } from '../lib/supabase'
 import { formatDateTime } from '../utils/time'
+import { getRoomStatus } from '../utils/roomStatus'
 
 const HOUSES = ['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6']
 
@@ -11,25 +12,65 @@ export default function HomePage() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [activeCycle, setActiveCycle] = useState(null)
+  const [flaggedHouses, setFlaggedHouses] = useState(new Set())
   const [fetchedAt, setFetchedAt] = useState(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    async function fetchCycle() {
-      const { data, error } = await supabase
+    async function fetchData() {
+      const { data: cycleData, error: cycleErr } = await supabase
         .from('cycles')
         .select('id')
         .eq('status', 'active')
         .single()
 
-      if (error || !data) {
+      if (cycleErr || !cycleData) {
         setError('Không tìm thấy chu kỳ đang hoạt động.')
         return
       }
-      setActiveCycle(data.id)
+      const cycleId = cycleData.id
+      setActiveCycle(cycleId)
+
+      // Current cycle readings (all houses)
+      const { data: currReadings } = await supabase
+        .from('readings')
+        .select('room_id, dien, nuoc, notes')
+        .eq('cycle_id', cycleId)
+
+      // Previous cycle
+      const { data: prevCycleData } = await supabase
+        .from('cycles')
+        .select('id')
+        .eq('status', 'closed')
+        .lt('id', cycleId)
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      const prevByRoom = {}
+      if (prevCycleData) {
+        const { data: prevReadings } = await supabase
+          .from('readings')
+          .select('room_id, dien, nuoc')
+          .eq('cycle_id', prevCycleData.id)
+        prevReadings?.forEach((r) => { prevByRoom[r.room_id] = r })
+      }
+
+      // Determine flagged houses
+      const currByRoom = {}
+      currReadings?.forEach((r) => { currByRoom[r.room_id] = r })
+
+      const flagged = new Set()
+      Object.keys(currByRoom).forEach((roomId) => {
+        const houseId = roomId.split('-')[0]
+        if (getRoomStatus(currByRoom[roomId], prevByRoom[roomId]) === 'flagged') {
+          flagged.add(houseId)
+        }
+      })
+      setFlaggedHouses(flagged)
       setFetchedAt(new Date())
     }
-    fetchCycle()
+    fetchData()
   }, [])
 
   function handleChange() {
@@ -102,7 +143,12 @@ export default function HomePage() {
                        shadow-sm border border-gray-100 active:bg-gray-50
                        text-left transition-colors"
           >
-            <span className="text-xl font-bold text-gray-900">{house}</span>
+            <div className="flex items-center gap-2.5">
+              {flaggedHouses.has(house) && (
+                <span className="w-3 h-3 rounded-full bg-amber-400 shrink-0" />
+              )}
+              <span className="text-xl font-bold text-gray-900">{house}</span>
+            </div>
             <svg
               className="w-5 h-5 text-gray-400"
               fill="none"

@@ -486,9 +486,9 @@ export default function RoomDetailPage() {
                   ) : (
                     <div>
                       <div className="flex py-2 border-b border-gray-100">
-                        <span className="flex-1 text-xs font-medium text-gray-400">Date</span>
-                        <span className="flex-1 text-center text-xs font-medium text-gray-400">Value</span>
-                        <span className="flex-1 text-right text-xs font-medium text-gray-400">Difference</span>
+                        <span className="flex-1 text-xs font-medium text-gray-400">Ngày</span>
+                        <span className="flex-1 text-center text-xs font-medium text-gray-400">Số</span>
+                        <span className="flex-1 text-right text-xs font-medium text-gray-400">Chênh Lệch</span>
                       </div>
                       {historyRows.map((r) => (
                         <button

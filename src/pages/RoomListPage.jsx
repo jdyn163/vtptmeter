@@ -45,12 +45,17 @@ export default function RoomListPage() {
       const cycleId = cycleData.id
       setActiveCycle(cycleId)
 
-      // 2. All rooms for this house
-      const { data: roomsData, error: roomsErr } = await supabase
-        .from('rooms')
-        .select('id')
-        .eq('house_id', houseId)
-        .order('id')
+      // 2. Rooms, curr readings, prev cycle lookup — all in parallel
+      const [
+        { data: roomsData, error: roomsErr },
+        { data: readingsData },
+        { data: prevCycleData },
+      ] = await Promise.all([
+        supabase.from('rooms').select('id').eq('house_id', houseId).order('id'),
+        supabase.from('readings').select('room_id, dien, nuoc, notes').eq('cycle_id', cycleId).like('room_id', `${houseId}-%`),
+        supabase.from('cycles').select('id').eq('status', 'closed').lt('id', cycleId)
+          .order('id', { ascending: false }).limit(1).maybeSingle(),
+      ])
 
       if (roomsErr || !roomsData) {
         setError('Không tải được danh sách phòng.')
@@ -58,23 +63,7 @@ export default function RoomListPage() {
         return
       }
 
-      // 3. All readings for this house + current cycle
-      const { data: readingsData } = await supabase
-        .from('readings')
-        .select('room_id, dien, nuoc, notes')
-        .eq('cycle_id', cycleId)
-        .like('room_id', `${houseId}-%`)
-
-      // 4. Previous cycle (most recent closed cycle before the active one)
-      const { data: prevCycleData } = await supabase
-        .from('cycles')
-        .select('id')
-        .eq('status', 'closed')
-        .lt('id', cycleId)
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-
+      // 3. Prev readings (depends on prev cycle id)
       const prevReadingsByRoom = {}
       if (prevCycleData) {
         const { data: prevReadingsData } = await supabase

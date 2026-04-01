@@ -7,6 +7,7 @@ import { formatDateTime } from '../utils/time'
 import { getRoomStatus } from '../utils/roomStatus'
 
 const HOUSES = ['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6']
+const ROOM_COUNTS = { A0: 6, A1: 12, A2: 5, A3: 13, A4: 9, A5: 14, A6: 14 }
 
 export default function HomePage() {
   const { user, logout } = useAuth()
@@ -32,21 +33,12 @@ export default function HomePage() {
       const cycleId = cycleData.id
       setActiveCycle(cycleId)
 
-      // Current cycle readings (all houses)
-      const { data: currReadings } = await supabase
-        .from('readings')
-        .select('room_id, dien, nuoc, notes')
-        .eq('cycle_id', cycleId)
-
-      // Previous cycle
-      const { data: prevCycleData } = await supabase
-        .from('cycles')
-        .select('id')
-        .eq('status', 'closed')
-        .lt('id', cycleId)
-        .order('id', { ascending: false })
-        .limit(1)
-        .maybeSingle()
+      // Curr readings + prev cycle lookup in parallel
+      const [{ data: currReadings }, { data: prevCycleData }] = await Promise.all([
+        supabase.from('readings').select('room_id, dien, nuoc, notes').eq('cycle_id', cycleId),
+        supabase.from('cycles').select('id').eq('status', 'closed').lt('id', cycleId)
+          .order('id', { ascending: false }).limit(1).maybeSingle(),
+      ])
 
       const prevByRoom = {}
       if (prevCycleData) {
@@ -57,12 +49,6 @@ export default function HomePage() {
         prevReadings?.forEach((r) => { prevByRoom[r.room_id] = r })
       }
 
-      // All rooms (for totals per house)
-      const { data: allRooms } = await supabase
-        .from('rooms')
-        .select('id, house_id')
-
-      // Determine flagged houses + progress
       const currByRoom = {}
       currReadings?.forEach((r) => { currByRoom[r.room_id] = r })
 
@@ -75,12 +61,12 @@ export default function HomePage() {
       })
       setFlaggedHouses(flagged)
 
-      // Compute recorded/total per house
+      // Use static counts — rooms table never changes
       const progress = {}
-      allRooms?.forEach((r) => {
-        if (!progress[r.house_id]) progress[r.house_id] = { recorded: 0, total: 0 }
-        progress[r.house_id].total += 1
-        if (currByRoom[r.id]) progress[r.house_id].recorded += 1
+      HOUSES.forEach((house) => { progress[house] = { recorded: 0, total: ROOM_COUNTS[house] } })
+      Object.keys(currByRoom).forEach((roomId) => {
+        const houseId = roomId.split('-')[0]
+        if (progress[houseId]) progress[houseId].recorded += 1
       })
       setHouseProgress(progress)
       setFetchedAt(new Date())

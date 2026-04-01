@@ -81,6 +81,7 @@ create index if not exists readings_room_cycle on readings(room_id, cycle_id);
 create index if not exists readings_cycle      on readings(cycle_id);
 create index if not exists logs_room           on logs(room_id);
 create index if not exists logs_created_at     on logs(created_at desc);
+create index if not exists rooms_house_id      on rooms(house_id);
 
 -- ============================================================
 -- SEED: Houses

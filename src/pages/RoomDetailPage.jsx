@@ -285,30 +285,19 @@ export default function RoomDetailPage() {
     const cycleId = cycleData?.id ?? null
     setActiveCycle(cycleId)
 
-    if (cycleId) {
-      const { data: curr } = await supabase
-        .from('readings')
-        .select('id, recorded_at, dien, nuoc, notes, created_at')
-        .eq('room_id', roomId)
-        .eq('cycle_id', cycleId)
-        .maybeSingle()
-      setCurrentReading(curr ?? null)
-    } else {
-      setCurrentReading(null)
-    }
-
-    const { data: hist } = await supabase
-      .from('readings')
-      .select('id, cycle_id, recorded_at, dien, nuoc, notes')
-      .eq('room_id', roomId)
-      .order('recorded_at', { ascending: false })
+    // Curr reading, all history, and logs in parallel
+    const [{ data: curr }, { data: hist }, { data: logsData }] = await Promise.all([
+      cycleId
+        ? supabase.from('readings').select('id, recorded_at, dien, nuoc, notes, created_at')
+            .eq('room_id', roomId).eq('cycle_id', cycleId).maybeSingle()
+        : Promise.resolve({ data: null }),
+      supabase.from('readings').select('id, cycle_id, recorded_at, dien, nuoc, notes')
+        .eq('room_id', roomId).order('recorded_at', { ascending: false }),
+      supabase.from('logs').select('id, action, username, created_at, snapshot')
+        .eq('room_id', roomId).order('created_at', { ascending: false }),
+    ])
+    setCurrentReading(curr ?? null)
     setAllReadings(hist ?? [])
-
-    const { data: logsData } = await supabase
-      .from('logs')
-      .select('id, action, username, created_at, snapshot')
-      .eq('room_id', roomId)
-      .order('created_at', { ascending: false })
     setLogs(logsData ?? [])
 
     setLoading(false)

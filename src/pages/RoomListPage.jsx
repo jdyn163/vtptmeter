@@ -121,7 +121,16 @@ export default function RoomListPage() {
         {/* Room list */}
         <div className="px-4 pb-8">
           {loading && (
-            <p className="text-center text-gray-400 py-16 text-sm">Đang tải...</p>
+            <div className="flex flex-col gap-2">
+              {[...Array(8)].map((_, i) => (
+                <div key={i} className="w-full flex items-center gap-3 px-5 py-4 bg-white rounded-2xl border border-gray-100 shadow-sm">
+                  <div className="flex-1 h-5 bg-gray-200 animate-pulse rounded-md" />
+                  <div className="w-14 h-8 bg-gray-200 animate-pulse rounded-md" />
+                  <div className="w-14 h-8 bg-gray-200 animate-pulse rounded-md" />
+                  <div className="w-4 h-4 bg-gray-200 animate-pulse rounded-sm shrink-0" />
+                </div>
+              ))}
+            </div>
           )}
 
           {error && (

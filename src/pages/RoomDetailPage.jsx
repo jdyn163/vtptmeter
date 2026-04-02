@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, X, RefreshCw, Zap, Droplet, ClipboardList } from 'lucide-react'
 import { supabase } from '../lib/supabase'
@@ -14,23 +14,21 @@ function todayVN() {
 }
 
 // ─── Screen 5: Record Reading Modal ───────────────────────────────────────────
-function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
+function RecordModal({ reading, cycleId, roomId, user, onSave, onSaveError, onSaveComplete, onClose }) {
   const isEdit = !!reading
   const [dien, setDien] = useState(reading?.dien != null ? String(reading.dien) : '')
   const [nuoc, setNuoc] = useState(reading?.nuoc != null ? String(reading.nuoc) : '')
   const [notes, setNotes] = useState(reading?.notes ?? '')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
 
   async function handleSave() {
-    setSaving(true)
-    setError('')
-
     const fields = {
       dien: dien !== '' ? Number(dien) : null,
       nuoc: nuoc !== '' ? Number(nuoc) : null,
       notes: notes.trim() || null,
     }
+
+    // Close modal and update UI immediately (optimistic)
+    onSave(fields)
 
     let err
     if (isEdit) {
@@ -53,12 +51,11 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
     }
 
     if (err) {
-      setError('Lỗi lưu dữ liệu. Thử lại.')
-      setSaving(false)
+      onSaveError?.('Lỗi lưu dữ liệu. Thử lại.')
       return
     }
 
-    await supabase.from('logs').insert({
+    supabase.from('logs').insert({
       room_id: roomId,
       action: 'ADD',
       user_id: user.id,
@@ -71,8 +68,7 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
       },
     })
 
-    setSaving(false)
-    onSave()
+    onSaveComplete?.()
   }
 
   return (
@@ -132,8 +128,6 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
             />
           </div>
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
-
           <div className="flex gap-3">
             <button
               onClick={onClose}
@@ -143,10 +137,9 @@ function RecordModal({ reading, cycleId, roomId, user, onSave, onClose }) {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving}
-              className="flex-1 bg-blue-600 text-white font-semibold py-3.5 rounded-xl text-sm disabled:opacity-50"
+              className="flex-1 bg-blue-600 text-white font-semibold py-3.5 rounded-xl text-sm"
             >
-              {saving ? 'Đang lưu...' : 'Lưu'}
+              Lưu
             </button>
           </div>
         </div>
@@ -265,11 +258,14 @@ export default function RoomDetailPage() {
   const [loading, setLoading] = useState(true)
   const [logsLoading, setLogsLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('dien')
+  const [saveError, setSaveError] = useState('')
 
   // Record modal
   const [recordOpen, setRecordOpen] = useState(false)
   const [recordReading, setRecordReading] = useState(null)
   const [recordCycleId, setRecordCycleId] = useState(null)
+  const [recordIsCurrentCycle, setRecordIsCurrentCycle] = useState(false)
+  const prevCurrentReadingRef = useRef(null)
 
   // History row bottom sheet
   const [sheetRow, setSheetRow] = useState(null)
@@ -318,16 +314,20 @@ export default function RoomDetailPage() {
 
   function openCardModal() {
     if (!activeCycle) return
+    setRecordIsCurrentCycle(true)
     setRecordReading(currentReading)
     setRecordCycleId(activeCycle)
     setRecordOpen(true)
+    setSaveError('')
   }
 
   function openEditFromSheet(reading) {
     setSheetRow(null)
+    setRecordIsCurrentCycle(false)
     setRecordReading(reading)
     setRecordCycleId(reading.cycle_id)
     setRecordOpen(true)
+    setSaveError('')
   }
 
   function getHistoryWithDiff(field) {
@@ -392,9 +392,36 @@ export default function RoomDetailPage() {
           </div>
         </div>
 
+        {saveError && (
+          <div className="px-4 mb-2">
+            <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between gap-2">
+              <p className="text-sm text-red-600">{saveError}</p>
+              <button onClick={() => setSaveError('')} className="text-red-400 hover:text-red-600 shrink-0">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="px-4 pb-12">
           {loading ? (
-            <p className="text-center text-gray-400 py-16 text-sm">Đang tải...</p>
+            <>
+              <p className="text-base font-bold text-gray-900 mb-3">Ghi Số Điện Nước</p>
+              <div className="flex flex-col gap-3 mb-6">
+                {[0, 1].map((i) => (
+                  <div key={i} className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-4 shadow-sm">
+                    <div className="h-3 w-16 bg-gray-200 animate-pulse rounded mb-3" />
+                    <div className="h-10 w-28 bg-gray-200 animate-pulse rounded-lg" />
+                  </div>
+                ))}
+              </div>
+              <div className="h-5 w-20 bg-gray-200 animate-pulse rounded mb-3 mt-6" />
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 px-4 py-4">
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} className={`h-4 bg-gray-200 animate-pulse rounded ${i < 3 ? 'mb-3' : ''}`} />
+                ))}
+              </div>
+            </>
           ) : (
             <>
               {/* Section label */}
@@ -546,11 +573,25 @@ export default function RoomDetailPage() {
           cycleId={recordCycleId}
           roomId={roomId}
           user={user}
-          onSave={() => {
+          onSave={(fields) => {
             setRecordOpen(false)
             setRecordReading(null)
-            fetchData()
+            if (recordIsCurrentCycle) {
+              prevCurrentReadingRef.current = currentReading
+              setCurrentReading((prev) => ({
+                ...(prev ?? {}),
+                dien: fields.dien,
+                nuoc: fields.nuoc,
+                notes: fields.notes,
+                recorded_at: prev?.recorded_at ?? todayVN(),
+              }))
+            }
           }}
+          onSaveError={(msg) => {
+            if (recordIsCurrentCycle) setCurrentReading(prevCurrentReadingRef.current)
+            setSaveError(msg)
+          }}
+          onSaveComplete={() => fetchData()}
           onClose={() => {
             setRecordOpen(false)
             setRecordReading(null)

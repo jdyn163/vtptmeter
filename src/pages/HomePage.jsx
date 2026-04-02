@@ -14,8 +14,9 @@ export default function HomePage() {
   const navigate = useNavigate()
   const [activeCycle, setActiveCycle] = useState(null)
   const [flaggedHouses, setFlaggedHouses] = useState(new Set())
-  const [houseProgress, setHouseProgress] = useState({}) // { A0: { recorded: 4, total: 6 }, ... }
+  const [houseProgress, setHouseProgress] = useState({})
   const [fetchedAt, setFetchedAt] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -70,6 +71,7 @@ export default function HomePage() {
       })
       setHouseProgress(progress)
       setFetchedAt(new Date())
+      setLoading(false)
     }
     fetchData()
   }, [])
@@ -136,7 +138,14 @@ export default function HomePage() {
 
       {/* House buttons */}
       <div className="flex flex-col gap-3">
-        {HOUSES.map((house) => (
+        {loading ? HOUSES.map((h) => (
+          <div key={h} className="w-full px-5 py-4 bg-white rounded-2xl shadow-sm border border-gray-100">
+            <div className="flex items-center justify-between">
+              <div className="h-7 w-10 bg-gray-200 animate-pulse rounded-lg" />
+              <div className="h-4 w-10 bg-gray-200 animate-pulse rounded-md" />
+            </div>
+          </div>
+        )) : HOUSES.map((house) => (
           <button
             key={house}
             onClick={() => navigate(`/house/${house}`)}
